@@ -1,5 +1,5 @@
 -- =====================================================
---   PROSPECTING HUB v4  |  Mixusfield UI
+--   PROSPECTING HUB v5  |  Mixusfield UI
 -- =====================================================
 local Mixusfield = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua"
@@ -14,9 +14,9 @@ local player            = Players.LocalPlayer
 -- =====================================================
 local AutoProspect  = false
 local AutoSell      = false
-local ProspectDelay = 1      -- 0.1 – 2 sec
-local TeleportStuds = 10     -- 1 – 50 studs
-local TeleportTimer = 2      -- 1 – 10 sec
+local ProspectDelay = 1      -- 0.1 – 2 sec between cycles
+local TeleportStuds = 10     -- 1 – 50 studs (teleport tab only)
+local TeleportTimer = 2      -- 1 – 10 sec  (teleport tab only)
 
 -- =====================================================
 -- CHARACTER HELPERS
@@ -33,6 +33,11 @@ local function getHumanoid()
     return char:FindFirstChildOfClass("Humanoid")
 end
 
+local function teleportTo(cf)
+    local hrp = getHRP()
+    if hrp then hrp.CFrame = cf end
+end
+
 local function getPan()
     local char = player.Character
     if not char then return nil end
@@ -45,8 +50,76 @@ local function getPan()
 end
 
 -- =====================================================
--- CORE PROSPECT ACTION
--- Fires Collect + Pan + Shake directly — no teleport needed
+-- FIND NEAREST SAND / DIRT PILE IN WORKSPACE
+-- Looks for any Part/Model named with common digging
+-- keywords that the game spawns near the player
+-- =====================================================
+local SAND_KEYWORDS = { "sand", "dirt", "gravel", "soil", "mud", "pile", "deposit", "ore" }
+
+local function findNearestSand()
+    local hrp = getHRP()
+    if not hrp then return nil end
+
+    local best, bestDist = nil, math.huge
+
+    -- Search common containers the game uses
+    local searchRoots = {
+        workspace,
+        workspace:FindFirstChild("Map"),
+        workspace:FindFirstChild("World"),
+        workspace:FindFirstChild("Zones"),
+        workspace:FindFirstChild("Areas"),
+    }
+
+    local function checkInstance(inst)
+        if not inst then return end
+        local nameLower = inst.Name:lower()
+        for _, kw in ipairs(SAND_KEYWORDS) do
+            if nameLower:find(kw) then
+                local pos
+                if inst:IsA("BasePart") then
+                    pos = inst.Position
+                elseif inst:IsA("Model") and inst.PrimaryPart then
+                    pos = inst.PrimaryPart.Position
+                elseif inst:IsA("Model") then
+                    -- fallback: find first BasePart
+                    local bp = inst:FindFirstChildOfClass("BasePart")
+                    if bp then pos = bp.Position end
+                end
+                if pos then
+                    local dist = (hrp.Position - pos).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        best = pos
+                    end
+                end
+                break
+            end
+        end
+    end
+
+    for _, root in ipairs(searchRoots) do
+        if root then
+            for _, child in ipairs(root:GetChildren()) do
+                checkInstance(child)
+                -- one level deeper
+                for _, grandchild in ipairs(child:GetChildren()) do
+                    checkInstance(grandchild)
+                end
+            end
+        end
+    end
+
+    return best  -- Vector3 or nil
+end
+
+-- =====================================================
+-- CORE PROSPECT CYCLE
+-- 1. Save original position
+-- 2. Fire Collect remote  (pick up sand)
+-- 3. Find the sand deposit → teleport to it
+-- 4. Fire Pan + Shake remotes  (shake the pan)
+-- 5. Return to original position
 -- =====================================================
 local function prospectOnce()
     local pan = getPan()
@@ -55,21 +128,40 @@ local function prospectOnce()
     local scripts = pan:FindFirstChild("Scripts")
     if not scripts then return end
 
-    local collect   = scripts:FindFirstChild("Collect")
-    local shake     = scripts:FindFirstChild("Shake")
-    local panRemote = scripts:FindFirstChild("Pan")
+    local collectRemote = scripts:FindFirstChild("Collect")
+    local panRemote     = scripts:FindFirstChild("Pan")
+    local shakeRemote   = scripts:FindFirstChild("Shake")
 
-    if collect and collect:IsA("RemoteFunction") then
-        pcall(function() collect:InvokeServer(1, true) end)
+    local hrp        = getHRP()
+    if not hrp then return end
+    local originalCF = hrp.CFrame
+
+    -- STEP 1: Fire Collect (pick up the sand)
+    if collectRemote and collectRemote:IsA("RemoteFunction") then
+        pcall(function() collectRemote:InvokeServer(1, true) end)
+    end
+    task.wait(0.2)  -- brief wait for server to register collect
+
+    -- STEP 2: Find nearest sand/deposit and teleport there
+    local sandPos = findNearestSand()
+    if sandPos then
+        -- Stand just above the deposit so we're at it
+        local targetCF = CFrame.new(sandPos + Vector3.new(0, 3, 0))
+        teleportTo(targetCF)
+        task.wait(0.15)  -- settle at the position
     end
 
+    -- STEP 3: Fire Pan + Shake (shake the pan at the deposit)
     if panRemote and panRemote:IsA("RemoteFunction") then
         pcall(function() panRemote:InvokeServer() end)
     end
-
-    if shake and shake:IsA("RemoteEvent") then
-        pcall(function() shake:FireServer() end)
+    if shakeRemote and shakeRemote:IsA("RemoteEvent") then
+        pcall(function() shakeRemote:FireServer() end)
     end
+    task.wait(0.3)  -- wait for shake to complete server-side
+
+    -- STEP 4: Return to original position
+    teleportTo(originalCF)
 end
 
 -- =====================================================
@@ -86,24 +178,7 @@ local function sellAll()
 end
 
 -- =====================================================
--- TELEPORT ACTION (independent, only used in Teleport tab)
--- =====================================================
-local function getFrontPosition(studs)
-    local hrp = getHRP()
-    if not hrp then return nil end
-    local look = hrp.CFrame.LookVector
-    local flat = Vector3.new(look.X, 0, look.Z).Unit
-    local newPos = hrp.CFrame.Position + flat * studs
-    return CFrame.new(newPos, newPos + flat)
-end
-
-local function teleportTo(cf)
-    local hrp = getHRP()
-    if hrp then hrp.CFrame = cf end
-end
-
--- =====================================================
--- AUTO LOOPS
+-- AUTO PROSPECT LOOP
 -- =====================================================
 task.spawn(function()
     while true do
@@ -116,6 +191,9 @@ task.spawn(function()
     end
 end)
 
+-- =====================================================
+-- AUTO SELL LOOP
+-- =====================================================
 task.spawn(function()
     while true do
         if AutoSell then
@@ -128,12 +206,26 @@ task.spawn(function()
 end)
 
 -- =====================================================
--- COMPLETE ALL  (prospect + sell in one cycle)
+-- COMPLETE ALL
+-- Full cycle: prospect (collect → teleport to sand →
+-- shake → return) then immediately sell all
 -- =====================================================
 local function completeAll()
     prospectOnce()
-    task.wait(0.5)
+    task.wait(0.4)
     sellAll()
+end
+
+-- =====================================================
+-- TELEPORT TAB HELPERS (independent)
+-- =====================================================
+local function getFrontPosition(studs)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local look = hrp.CFrame.LookVector
+    local flat = Vector3.new(look.X, 0, look.Z).Unit
+    local newPos = hrp.CFrame.Position + flat * studs
+    return CFrame.new(newPos, newPos + flat)
 end
 
 -- =====================================================
@@ -248,7 +340,7 @@ end
 -- =====================================================
 local Window = Mixusfield:CreateWindow({
     Name         = "Prospecting Hub",
-    Subtitle     = "v4",
+    Subtitle     = "v5",
     Theme        = "Dark",
     ToggleButton = { Enabled = true },
 })
@@ -263,6 +355,11 @@ local Main = Window:CreateTab({
 
 -- ── AUTO PROSPECT ────────────────────────────────────
 Main:CreateSection({ Name = "⛏️ Auto Prospect" })
+
+Main:CreateParagraph({
+    Title   = "How Auto Prospect Works",
+    Content = "1. Fires Collect remote (picks up sand)\n2. Finds nearest sand deposit → teleports to it\n3. Fires Pan + Shake remotes\n4. Returns to original position\n5. Repeats on the set interval",
+})
 
 Main:CreateToggle({
     Name     = "Auto Prospect",
@@ -291,18 +388,23 @@ Main:CreateButton({
     Name     = "Prospect Once",
     Callback = function()
         task.spawn(prospectOnce)
-        Mixusfield:Notify({ Title = "Done", Content = "Prospect fired.", Type = "success" })
+        Mixusfield:Notify({ Title = "Prospect", Content = "One cycle fired.", Type = "success" })
     end,
 })
 
 -- ── COMPLETE ALL ─────────────────────────────────────
 Main:CreateSection({ Name = "✅ Complete All" })
 
+Main:CreateParagraph({
+    Title   = "Complete All Info",
+    Content = "Runs one full prospect cycle (collect → teleport to sand → shake → return) then immediately sells everything in your backpack.",
+})
+
 Main:CreateButton({
     Name     = "Complete All  (Prospect + Sell)",
     Callback = function()
         task.spawn(completeAll)
-        Mixusfield:Notify({ Title = "Complete All", Content = "Prospecting then selling…", Type = "info" })
+        Mixusfield:Notify({ Title = "Complete All", Content = "Running prospect then selling…", Type = "info" })
     end,
 })
 
@@ -316,7 +418,7 @@ Main:CreateToggle({
         AutoSell = v
         Mixusfield:Notify({
             Title   = "Auto Sell",
-            Content = v and "Auto Sell ON — every 3s" or "Auto Sell OFF",
+            Content = v and "Auto Sell ON — fires every 3s" or "Auto Sell OFF",
             Type    = v and "success" or "info",
         })
     end,
@@ -356,18 +458,18 @@ Main:CreateButton({
 })
 
 -- =====================================================
--- TAB: TELEPORT
+-- TAB: TELEPORT  (manual, independent from Auto Prospect)
 -- =====================================================
 local Teleport = Window:CreateTab({
     Name = "Teleport",
     Icon = { Type = "Lucide", Source = "navigation" },
 })
 
-Teleport:CreateSection({ Name = "🚀 Teleport Settings" })
+Teleport:CreateSection({ Name = "🚀 Manual Teleport" })
 
 Teleport:CreateParagraph({
-    Title   = "How It Works",
-    Content = "Teleport is fully independent from Auto Prospect.\nUse the button to instantly move forward by set studs, hold for the timer, then snap back.\nAuto Prospect runs its own remotes separately — it does not depend on this tab.",
+    Title   = "Note",
+    Content = "This tab is for manual forward teleporting only.\nAuto Prospect handles its own teleport to sand deposits automatically — this tab does not affect it.",
 })
 
 Teleport:CreateSlider({
@@ -387,10 +489,7 @@ Teleport:CreateSlider({
     Default   = 2,
     Increment = 1,
     Suffix    = "s",
-    Callback  = function(v)
-        TeleportTimer = v
-        Mixusfield:Notify({ Title = "Timer Set", Content = "Hold time: "..v.."s", Type = "info" })
-    end,
+    Callback  = function(v) TeleportTimer = v end,
 })
 
 Teleport:CreateButton({
@@ -538,8 +637,8 @@ Settings:CreateDropdown({
 Settings:CreateSection({ Name = "⚙️ System" })
 
 Settings:CreateParagraph({
-    Title   = "Hub Info",
-    Content = "✔ Auto Prospect fires Collect + Pan + Shake directly\n✔ Prospect Speed: 0.1 – 2s\n✔ Teleport is independent — does not affect Auto Prospect\n✔ Teleport Hold Timer: 1 – 10s\n✔ Walk Speed: 16 – 300\n✔ Complete All: Prospect then Sell\n✔ Auto Sell: every 3s\n✔ Shop: Pans, Shovels, Potions, Items\n✔ Theme changer\n✔ All systems stable",
+    Title   = "Hub Info v5",
+    Content = "✔ Auto Prospect: Collect → teleport to sand → Shake → return → repeat\n✔ Prospect Speed: 0.1 – 2s\n✔ Complete All: full cycle + sell\n✔ Auto Sell: every 3s\n✔ Walk Speed: 16 – 300\n✔ Manual Teleport: 1–50 studs, 1–10s hold\n✔ Shop: Pans, Shovels, Potions, Items\n✔ Theme changer\n✔ All systems stable",
 })
 
 Settings:CreateButton({
