@@ -1,5 +1,5 @@
 -- =====================================================
---   PROSPECTING HUB v3  |  Mixusfield UI
+--   PROSPECTING HUB v4  |  Mixusfield UI
 -- =====================================================
 local Mixusfield = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua"
@@ -7,7 +7,6 @@ local Mixusfield = loadstring(game:HttpGet(
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService        = game:GetService("RunService")
 local player            = Players.LocalPlayer
 
 -- =====================================================
@@ -17,10 +16,10 @@ local AutoProspect  = false
 local AutoSell      = false
 local ProspectDelay = 1      -- 0.1 – 2 sec
 local TeleportStuds = 10     -- 1 – 50 studs
-local TeleportTimer = 2      -- 1 – 10 sec (hold at forward pos)
+local TeleportTimer = 2      -- 1 – 10 sec
 
 -- =====================================================
--- HELPERS
+-- CHARACTER HELPERS
 -- =====================================================
 local function getHRP()
     local char = player.Character
@@ -34,22 +33,9 @@ local function getHumanoid()
     return char:FindFirstChildOfClass("Humanoid")
 end
 
-local function teleportTo(cf)
-    local hrp = getHRP()
-    if hrp then hrp.CFrame = cf end
-end
-
-local function getFrontPosition(studs)
-    local hrp = getHRP()
-    if not hrp then return nil end
-    local look = hrp.CFrame.LookVector
-    local flat = Vector3.new(look.X, 0, look.Z).Unit
-    local newPos = hrp.CFrame.Position + flat * studs
-    return CFrame.new(newPos, newPos + flat)
-end
-
 local function getPan()
-    local char = player.Character or player.CharacterAdded:Wait()
+    local char = player.Character
+    if not char then return nil end
     for _, v in pairs(char:GetChildren()) do
         if v:IsA("Tool") and v.Name:lower():find("pan") then
             return v
@@ -59,11 +45,13 @@ local function getPan()
 end
 
 -- =====================================================
--- PROSPECT
+-- CORE PROSPECT ACTION
+-- Fires Collect + Pan + Shake directly — no teleport needed
 -- =====================================================
 local function prospectOnce()
     local pan = getPan()
     if not pan then return end
+
     local scripts = pan:FindFirstChild("Scripts")
     if not scripts then return end
 
@@ -71,37 +59,21 @@ local function prospectOnce()
     local shake     = scripts:FindFirstChild("Shake")
     local panRemote = scripts:FindFirstChild("Pan")
 
-    local hrp        = getHRP()
-    local originalCF = hrp and hrp.CFrame
-
-    -- Teleport forward
-    if originalCF then
-        local frontCF = getFrontPosition(TeleportStuds)
-        if frontCF then
-            teleportTo(frontCF)
-            task.wait(TeleportTimer)   -- hold at forward position
-        end
-    end
-
-    -- Fire remotes
     if collect and collect:IsA("RemoteFunction") then
         pcall(function() collect:InvokeServer(1, true) end)
     end
+
     if panRemote and panRemote:IsA("RemoteFunction") then
         pcall(function() panRemote:InvokeServer() end)
     end
+
     if shake and shake:IsA("RemoteEvent") then
         pcall(function() shake:FireServer() end)
-    end
-
-    -- Return
-    if originalCF then
-        teleportTo(originalCF)
     end
 end
 
 -- =====================================================
--- SELL
+-- SELL ACTION
 -- =====================================================
 local function sellAll()
     pcall(function()
@@ -111,6 +83,23 @@ local function sellAll()
             :WaitForChild("SellAll")
             :InvokeServer()
     end)
+end
+
+-- =====================================================
+-- TELEPORT ACTION (independent, only used in Teleport tab)
+-- =====================================================
+local function getFrontPosition(studs)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local look = hrp.CFrame.LookVector
+    local flat = Vector3.new(look.X, 0, look.Z).Unit
+    local newPos = hrp.CFrame.Position + flat * studs
+    return CFrame.new(newPos, newPos + flat)
+end
+
+local function teleportTo(cf)
+    local hrp = getHRP()
+    if hrp then hrp.CFrame = cf end
 end
 
 -- =====================================================
@@ -137,6 +126,15 @@ task.spawn(function()
         end
     end
 end)
+
+-- =====================================================
+-- COMPLETE ALL  (prospect + sell in one cycle)
+-- =====================================================
+local function completeAll()
+    prospectOnce()
+    task.wait(0.5)
+    sellAll()
+end
 
 -- =====================================================
 -- SHOP DATA
@@ -250,7 +248,7 @@ end
 -- =====================================================
 local Window = Mixusfield:CreateWindow({
     Name         = "Prospecting Hub",
-    Subtitle     = "v3",
+    Subtitle     = "v4",
     Theme        = "Dark",
     ToggleButton = { Enabled = true },
 })
@@ -293,24 +291,23 @@ Main:CreateButton({
     Name     = "Prospect Once",
     Callback = function()
         task.spawn(prospectOnce)
-        Mixusfield:Notify({ Title = "Done", Content = "Manual prospect fired.", Type = "success" })
+        Mixusfield:Notify({ Title = "Done", Content = "Prospect fired.", Type = "success" })
     end,
 })
 
 -- ── COMPLETE ALL ─────────────────────────────────────
-Main:CreateSection({ Name = "💸 Growing" })
+Main:CreateSection({ Name = "✅ Complete All" })
 
 Main:CreateButton({
-    Name     = "(Prospect + Sell)",
+    Name     = "Complete All  (Prospect + Sell)",
     Callback = function()
-        task.spawn(function()
-            prospectOnce()
-            task.wait(0.4)
-            sellAll()
-        end)
+        task.spawn(completeAll)
         Mixusfield:Notify({ Title = "Complete All", Content = "Prospecting then selling…", Type = "info" })
     end,
 })
+
+-- ── SELL ─────────────────────────────────────────────
+Main:CreateSection({ Name = "💰 Sell" })
 
 Main:CreateToggle({
     Name     = "Auto Sell",
@@ -353,10 +350,8 @@ Main:CreateButton({
     Name     = "Reset Walk Speed",
     Callback = function()
         local hum = getHumanoid()
-        if hum then
-            hum.WalkSpeed = 16
-            Mixusfield:Notify({ Title = "Speed Reset", Content = "Walk speed set to 16.", Type = "info" })
-        end
+        if hum then hum.WalkSpeed = 16 end
+        Mixusfield:Notify({ Title = "Speed Reset", Content = "Walk speed set to 16.", Type = "info" })
     end,
 })
 
@@ -372,7 +367,7 @@ Teleport:CreateSection({ Name = "🚀 Teleport Settings" })
 
 Teleport:CreateParagraph({
     Title   = "How It Works",
-    Content = "Before each pan shake, the script teleports you forward on X/Z (no height change).\nIt holds there for the set timer, fires all remotes, then snaps you back to your original position.",
+    Content = "Teleport is fully independent from Auto Prospect.\nUse the button to instantly move forward by set studs, hold for the timer, then snap back.\nAuto Prospect runs its own remotes separately — it does not depend on this tab.",
 })
 
 Teleport:CreateSlider({
@@ -386,7 +381,7 @@ Teleport:CreateSlider({
 })
 
 Teleport:CreateSlider({
-    Name      = "Teleport Hold Timer",
+    Name      = "Hold Timer",
     Min       = 1,
     Max       = 10,
     Default   = 2,
@@ -394,12 +389,12 @@ Teleport:CreateSlider({
     Suffix    = "s",
     Callback  = function(v)
         TeleportTimer = v
-        Mixusfield:Notify({ Title = "Timer Set", Content = "Hold at forward position: "..v.."s", Type = "info" })
+        Mixusfield:Notify({ Title = "Timer Set", Content = "Hold time: "..v.."s", Type = "info" })
     end,
 })
 
 Teleport:CreateButton({
-    Name     = "Test Teleport",
+    Name     = "Teleport Forward",
     Callback = function()
         local hrp = getHRP()
         if not hrp then
@@ -416,11 +411,6 @@ Teleport:CreateButton({
             Mixusfield:Notify({ Title = "Returned", Content = "Back to original spot.", Type = "success" })
         end
     end,
-})
-
-Teleport:CreateParagraph({
-    Title   = "Notes",
-    Content = "• Only X and Z axes move — height never changes\n• Forward Studs: how far ahead you teleport\n• Hold Timer: how many seconds you stay forward\n• Position is always restored after every action",
 })
 
 -- =====================================================
@@ -448,7 +438,9 @@ Shop:CreateButton({
 })
 do
     local t = ""
-    for _, n in ipairs(panList) do t = t..n.." → "..formatPrice(ShopItems.Pans[n].Price).." ["..ShopItems.Pans[n].Zone.."]\n" end
+    for _, n in ipairs(panList) do
+        t = t..n.." → "..formatPrice(ShopItems.Pans[n].Price).." ["..ShopItems.Pans[n].Zone.."]\n"
+    end
     Shop:CreateParagraph({ Title = "Pan Prices", Content = t })
 end
 
@@ -469,7 +461,9 @@ Shop:CreateButton({
 })
 do
     local t = ""
-    for _, n in ipairs(shovelList) do t = t..n.." → "..formatPrice(ShopItems.Shovels[n].Price).." ["..ShopItems.Shovels[n].Zone.."]\n" end
+    for _, n in ipairs(shovelList) do
+        t = t..n.." → "..formatPrice(ShopItems.Shovels[n].Price).." ["..ShopItems.Shovels[n].Zone.."]\n"
+    end
     Shop:CreateParagraph({ Title = "Shovel Prices", Content = t })
 end
 
@@ -514,7 +508,9 @@ Shop:CreateButton({
 })
 do
     local t = ""
-    for _, n in ipairs(itemList) do t = t..n.." → "..formatPrice(ShopItems.Items[n].Price).." ["..ShopItems.Items[n].Zone.."]\n" end
+    for _, n in ipairs(itemList) do
+        t = t..n.." → "..formatPrice(ShopItems.Items[n].Price).." ["..ShopItems.Items[n].Zone.."]\n"
+    end
     Shop:CreateParagraph({ Title = "Item Prices", Content = t })
 end
 
@@ -543,7 +539,7 @@ Settings:CreateSection({ Name = "⚙️ System" })
 
 Settings:CreateParagraph({
     Title   = "Hub Info",
-    Content = "✔ Auto Prospect  (0.1 – 2s speed)\n✔ Teleport Hold Timer  (1 – 10s)\n✔ Forward Studs  (1 – 50)\n✔ Walk Speed  (16 – 300)\n✔ Complete All  (Prospect + Sell)\n✔ Auto Sell  (every 3s)\n✔ Shop  (Pans, Shovels, Potions, Items)\n✔ Theme changer\n✔ All systems stable",
+    Content = "✔ Auto Prospect fires Collect + Pan + Shake directly\n✔ Prospect Speed: 0.1 – 2s\n✔ Teleport is independent — does not affect Auto Prospect\n✔ Teleport Hold Timer: 1 – 10s\n✔ Walk Speed: 16 – 300\n✔ Complete All: Prospect then Sell\n✔ Auto Sell: every 3s\n✔ Shop: Pans, Shovels, Potions, Items\n✔ Theme changer\n✔ All systems stable",
 })
 
 Settings:CreateButton({
