@@ -1,47 +1,68 @@
 -- =====================================================
---   PROSPECTING HUB v5  |  Mixusfield UI
+--   PROSPECTING HUB  v5  |  Mixusfield UI
+--   Improved: faster prospecting, burst mode, cleaner
+--   code, smoother loops, better error handling
 -- =====================================================
 local Mixusfield = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua"
 ))()
 
+-- ── SERVICES ─────────────────────────────────────────
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
 local player            = Players.LocalPlayer
 
--- =====================================================
--- STATE
--- =====================================================
+-- ── STATE ────────────────────────────────────────────
 local AutoProspect  = false
 local AutoSell      = false
-local ProspectDelay = 1      -- 0.1 – 2 sec between cycles
-local TeleportStuds = 10     -- 1 – 50 studs (teleport tab only)
-local TeleportTimer = 2      -- 1 – 10 sec  (teleport tab only)
+local BurstMode     = false       -- NEW: fires multiple times per cycle
+local ProspectDelay = 0.5         -- lowered default from 1 → 0.5
+local BurstCount    = 3           -- NEW: how many times to fire per burst
+local TeleportStuds = 10
+local TeleportTimer = 2
+local SellInterval  = 3           -- seconds between auto-sell
 
--- =====================================================
--- CHARACTER HELPERS
--- =====================================================
+-- ── CACHED REMOTES (fetched once, reused) ────────────
+local _remotes       = nil
+local _shopRemote    = nil
+
+local function getRemotes()
+    if _remotes then return _remotes end
+    local ok, result = pcall(function()
+        return ReplicatedStorage:WaitForChild("Remotes", 5)
+    end)
+    if ok and result then
+        _remotes = result
+        return _remotes
+    end
+    return nil
+end
+
+local function getShopRemote(name)
+    local remotes = getRemotes()
+    if not remotes then return nil end
+    local ok, result = pcall(function()
+        return remotes:WaitForChild("Shop", 5):WaitForChild(name, 5)
+    end)
+    return ok and result or nil
+end
+
+-- ── CHARACTER HELPERS ────────────────────────────────
 local function getHRP()
     local char = player.Character
-    if not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart")
+    return char and char:FindFirstChild("HumanoidRootPart")
 end
 
 local function getHumanoid()
     local char = player.Character
-    if not char then return nil end
-    return char:FindFirstChildOfClass("Humanoid")
-end
-
-local function teleportTo(cf)
-    local hrp = getHRP()
-    if hrp then hrp.CFrame = cf end
+    return char and char:FindFirstChildOfClass("Humanoid")
 end
 
 local function getPan()
     local char = player.Character
     if not char then return nil end
-    for _, v in pairs(char:GetChildren()) do
+    for _, v in ipairs(char:GetChildren()) do
         if v:IsA("Tool") and v.Name:lower():find("pan") then
             return v
         end
@@ -49,176 +70,78 @@ local function getPan()
     return nil
 end
 
--- =====================================================
--- FIND NEAREST SAND / DIRT PILE IN WORKSPACE
--- Looks for any Part/Model named with common digging
--- keywords that the game spawns near the player
--- =====================================================
-local SAND_KEYWORDS = { "sand", "dirt", "gravel", "soil", "mud", "pile", "deposit", "ore" }
+-- ── CACHED PAN SCRIPTS ───────────────────────────────
+-- Re-cache whenever pan changes for speed
+local _cachedPan     = nil
+local _collect       = nil
+local _panRemote     = nil
+local _shake         = nil
 
-local function findNearestSand()
-    local hrp = getHRP()
-    if not hrp then return nil end
-
-    local best, bestDist = nil, math.huge
-
-    -- Search common containers the game uses
-    local searchRoots = {
-        workspace,
-        workspace:FindFirstChild("Map"),
-        workspace:FindFirstChild("World"),
-        workspace:FindFirstChild("Zones"),
-        workspace:FindFirstChild("Areas"),
-    }
-
-    local function checkInstance(inst)
-        if not inst then return end
-        local nameLower = inst.Name:lower()
-        for _, kw in ipairs(SAND_KEYWORDS) do
-            if nameLower:find(kw) then
-                local pos
-                if inst:IsA("BasePart") then
-                    pos = inst.Position
-                elseif inst:IsA("Model") and inst.PrimaryPart then
-                    pos = inst.PrimaryPart.Position
-                elseif inst:IsA("Model") then
-                    -- fallback: find first BasePart
-                    local bp = inst:FindFirstChildOfClass("BasePart")
-                    if bp then pos = bp.Position end
-                end
-                if pos then
-                    local dist = (hrp.Position - pos).Magnitude
-                    if dist < bestDist then
-                        bestDist = dist
-                        best = pos
-                    end
-                end
-                break
-            end
-        end
-    end
-
-    for _, root in ipairs(searchRoots) do
-        if root then
-            for _, child in ipairs(root:GetChildren()) do
-                checkInstance(child)
-                -- one level deeper
-                for _, grandchild in ipairs(child:GetChildren()) do
-                    checkInstance(grandchild)
-                end
-            end
-        end
-    end
-
-    return best  -- Vector3 or nil
-end
-
--- =====================================================
--- CORE PROSPECT CYCLE
--- 1. Save original position
--- 2. Fire Collect remote  (pick up sand)
--- 3. Find the sand deposit → teleport to it
--- 4. Fire Pan + Shake remotes  (shake the pan)
--- 5. Return to original position
--- =====================================================
-local function prospectOnce()
+local function refreshPanCache()
     local pan = getPan()
+    if pan == _cachedPan then return end   -- nothing changed
+    _cachedPan  = pan
+    _collect    = nil
+    _panRemote  = nil
+    _shake      = nil
     if not pan then return end
-
     local scripts = pan:FindFirstChild("Scripts")
     if not scripts then return end
-
-    local collectRemote = scripts:FindFirstChild("Collect")
-    local panRemote     = scripts:FindFirstChild("Pan")
-    local shakeRemote   = scripts:FindFirstChild("Shake")
-
-    local hrp        = getHRP()
-    if not hrp then return end
-    local originalCF = hrp.CFrame
-
-    -- STEP 1: Fire Collect (pick up the sand)
-    if collectRemote and collectRemote:IsA("RemoteFunction") then
-        pcall(function() collectRemote:InvokeServer(1, true) end)
-    end
-    task.wait(0.2)  -- brief wait for server to register collect
-
-    -- STEP 2: Find nearest sand/deposit and teleport there
-    local sandPos = findNearestSand()
-    if sandPos then
-        -- Stand just above the deposit so we're at it
-        local targetCF = CFrame.new(sandPos + Vector3.new(0, 3, 0))
-        teleportTo(targetCF)
-        task.wait(0.15)  -- settle at the position
-    end
-
-    -- STEP 3: Fire Pan + Shake (shake the pan at the deposit)
-    if panRemote and panRemote:IsA("RemoteFunction") then
-        pcall(function() panRemote:InvokeServer() end)
-    end
-    if shakeRemote and shakeRemote:IsA("RemoteEvent") then
-        pcall(function() shakeRemote:FireServer() end)
-    end
-    task.wait(0.3)  -- wait for shake to complete server-side
-
-    -- STEP 4: Return to original position
-    teleportTo(originalCF)
+    _collect   = scripts:FindFirstChild("Collect")
+    _panRemote = scripts:FindFirstChild("Pan")
+    _shake     = scripts:FindFirstChild("Shake")
 end
 
--- =====================================================
--- SELL ACTION
--- =====================================================
+-- ── CORE PROSPECT ────────────────────────────────────
+-- Fires all three remotes with no unnecessary waits
+local function prospectOnce()
+    refreshPanCache()
+    if not _cachedPan then return false end
+
+    if _collect and _collect:IsA("RemoteFunction") then
+        pcall(_collect.InvokeServer, _collect, 1, true)
+    end
+    if _panRemote and _panRemote:IsA("RemoteFunction") then
+        pcall(_panRemote.InvokeServer, _panRemote)
+    end
+    if _shake and _shake:IsA("RemoteEvent") then
+        pcall(_shake.FireServer, _shake)
+    end
+    return true
+end
+
+-- Burst: fires N times back-to-back with minimal spacing
+local function prospectBurst()
+    for i = 1, BurstCount do
+        prospectOnce()
+        if i < BurstCount then
+            task.wait(0.05)   -- tiny gap between bursts to avoid throttle
+        end
+    end
+end
+
+-- ── SELL ─────────────────────────────────────────────
+local _sellRemote = nil
+
 local function sellAll()
-    pcall(function()
-        ReplicatedStorage
-            :WaitForChild("Remotes")
-            :WaitForChild("Shop")
-            :WaitForChild("SellAll")
-            :InvokeServer()
-    end)
+    if not _sellRemote then
+        _sellRemote = getShopRemote("SellAll")
+    end
+    if _sellRemote then
+        pcall(_sellRemote.InvokeServer, _sellRemote)
+    end
 end
 
--- =====================================================
--- AUTO PROSPECT LOOP
--- =====================================================
-task.spawn(function()
-    while true do
-        if AutoProspect then
-            prospectOnce()
-            task.wait(ProspectDelay)
-        else
-            task.wait(0.2)
-        end
-    end
-end)
-
--- =====================================================
--- AUTO SELL LOOP
--- =====================================================
-task.spawn(function()
-    while true do
-        if AutoSell then
-            sellAll()
-            task.wait(3)
-        else
-            task.wait(0.5)
-        end
-    end
-end)
-
--- =====================================================
--- COMPLETE ALL
--- Full cycle: prospect (collect → teleport to sand →
--- shake → return) then immediately sell all
--- =====================================================
+-- ── COMPLETE ALL ─────────────────────────────────────
 local function completeAll()
-    prospectOnce()
-    task.wait(0.4)
-    sellAll()
+    local fired = BurstMode and prospectBurst() or prospectOnce()
+    if fired then
+        task.wait(0.3)    -- brief settle before selling
+        sellAll()
+    end
 end
 
--- =====================================================
--- TELEPORT TAB HELPERS (independent)
--- =====================================================
+-- ── TELEPORT HELPERS ─────────────────────────────────
 local function getFrontPosition(studs)
     local hrp = getHRP()
     if not hrp then return nil end
@@ -228,116 +151,176 @@ local function getFrontPosition(studs)
     return CFrame.new(newPos, newPos + flat)
 end
 
--- =====================================================
--- SHOP DATA
--- =====================================================
+local function teleportTo(cf)
+    local hrp = getHRP()
+    if hrp then hrp.CFrame = cf end
+end
+
+-- ── AUTO LOOPS ───────────────────────────────────────
+-- Prospect loop: efficient, no idle spinning
+task.spawn(function()
+    while true do
+        if AutoProspect then
+            if BurstMode then
+                prospectBurst()
+            else
+                prospectOnce()
+            end
+            task.wait(math.max(ProspectDelay, 0.05))
+        else
+            task.wait(0.1)
+        end
+    end
+end)
+
+-- Sell loop
+task.spawn(function()
+    while true do
+        if AutoSell then
+            sellAll()
+            task.wait(SellInterval)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+-- ── SHOP DATA ────────────────────────────────────────
 local ShopItems = {
     Pans = {
-        ["Plastic Pan"]      = {Price = 500,          Zone = "StarterTown"},
-        ["Metal Pan"]        = {Price = 12000,         Zone = "StarterTown"},
-        ["Silver Pan"]       = {Price = 55000,         Zone = "StarterTown"},
-        ["Golden Pan"]       = {Price = 333000,        Zone = "RiverTown"},
-        ["Magnetic Pan"]     = {Price = 1000000,       Zone = "RiverTown"},
-        ["Frostbite Pan"]    = {Price = 2500000,       Zone = "FrozenPeak"},
-        ["Abyssal Pan"]      = {Price = 15000000,      Zone = "Grotto"},
-        ["Nebula Pan"]       = {Price = 45000000,      Zone = "MeteorValley"},
-        ["Gingerbread Pan"]  = {Price = 8000000,       Zone = "NorthPole"},
-        ["Blightflow Pan"]   = {Price = 12000000,      Zone = "Swamp"},
-        ["Dragonflame Pan"]  = {Price = 75000000,      Zone = "Volcano"},
-        ["Fossilized Pan"]   = {Price = 90000000,      Zone = "Volcano"},
-        ["Aurora Pan"]       = {Price = 150000000,     Zone = "Cavern"},
-        ["Lifetouched Pan"]  = {Price = 80000000000,   Zone = "Grotto"},
+        ["Plastic Pan"]      = { Price = 500,          Zone = "StarterTown" },
+        ["Metal Pan"]        = { Price = 12000,         Zone = "StarterTown" },
+        ["Silver Pan"]       = { Price = 55000,         Zone = "StarterTown" },
+        ["Golden Pan"]       = { Price = 333000,        Zone = "RiverTown"   },
+        ["Magnetic Pan"]     = { Price = 1000000,       Zone = "RiverTown"   },
+        ["Frostbite Pan"]    = { Price = 2500000,       Zone = "FrozenPeak"  },
+        ["Abyssal Pan"]      = { Price = 15000000,      Zone = "Grotto"      },
+        ["Nebula Pan"]       = { Price = 45000000,      Zone = "MeteorValley"},
+        ["Gingerbread Pan"]  = { Price = 8000000,       Zone = "NorthPole"   },
+        ["Blightflow Pan"]   = { Price = 12000000,      Zone = "Swamp"       },
+        ["Dragonflame Pan"]  = { Price = 75000000,      Zone = "Volcano"     },
+        ["Fossilized Pan"]   = { Price = 90000000,      Zone = "Volcano"     },
+        ["Aurora Pan"]       = { Price = 150000000,     Zone = "Cavern"      },
+        ["Lifetouched Pan"]  = { Price = 80000000000,   Zone = "Grotto"      },
     },
     Shovels = {
-        ["Iron Shovel"]        = {Price = 3000,           Zone = "StarterTown"},
-        ["Steel Shovel"]       = {Price = 25000,          Zone = "StarterTown"},
-        ["Silver Shovel"]      = {Price = 75000,          Zone = "StarterTown"},
-        ["Reinforced Shovel"]  = {Price = 135000,         Zone = "StarterTown"},
-        ["Golden Shovel"]      = {Price = 1333000,        Zone = "RiverTown"},
-        ["Meteoric Shovel"]    = {Price = 4000000,        Zone = "RiverTown"},
-        ["Diamond Shovel"]     = {Price = 12500000,       Zone = "RiverTown"},
-        ["Abyssal Shovel"]     = {Price = 18000000,       Zone = "Grotto"},
-        ["Venomspade"]         = {Price = 22000000,       Zone = "Swamp"},
-        ["Dragonflame Shovel"] = {Price = 400000000,      Zone = "Volcano"},
-        ["Fossilized Shovel"]  = {Price = 1000000000,     Zone = "Volcano"},
-        ["Icebreaker"]         = {Price = 10000000000,    Zone = "FrozenPeak"},
-        ["Candy Cane Shovel"]  = {Price = 5000000,        Zone = "NorthPole"},
-        ["Divine Shovel"]      = {Price = 40000000,       Zone = "Cavern"},
-        ["Earthbreaker"]       = {Price = 125000000,      Zone = "Cavern"},
-        ["Worldshaker"]        = {Price = 300000000,      Zone = "Cavern"},
-        ["Lifetouched Shovel"] = {Price = 80000000000,    Zone = "Grotto"},
+        ["Iron Shovel"]        = { Price = 3000,           Zone = "StarterTown" },
+        ["Steel Shovel"]       = { Price = 25000,          Zone = "StarterTown" },
+        ["Silver Shovel"]      = { Price = 75000,          Zone = "StarterTown" },
+        ["Reinforced Shovel"]  = { Price = 135000,         Zone = "StarterTown" },
+        ["Golden Shovel"]      = { Price = 1333000,        Zone = "RiverTown"   },
+        ["Meteoric Shovel"]    = { Price = 4000000,        Zone = "RiverTown"   },
+        ["Diamond Shovel"]     = { Price = 12500000,       Zone = "RiverTown"   },
+        ["Abyssal Shovel"]     = { Price = 18000000,       Zone = "Grotto"      },
+        ["Venomspade"]         = { Price = 22000000,       Zone = "Swamp"       },
+        ["Dragonflame Shovel"] = { Price = 400000000,      Zone = "Volcano"     },
+        ["Fossilized Shovel"]  = { Price = 1000000000,     Zone = "Volcano"     },
+        ["Icebreaker"]         = { Price = 10000000000,    Zone = "FrozenPeak"  },
+        ["Candy Cane Shovel"]  = { Price = 5000000,        Zone = "NorthPole"   },
+        ["Divine Shovel"]      = { Price = 40000000,       Zone = "Cavern"      },
+        ["Earthbreaker"]       = { Price = 125000000,      Zone = "Cavern"      },
+        ["Worldshaker"]        = { Price = 300000000,      Zone = "Cavern"      },
+        ["Lifetouched Shovel"] = { Price = 80000000000,    Zone = "Grotto"      },
     },
     Potions = {
-        ["Basic Luck Potion"]        = {Price = 5000,    Zone = "RiverTown",    Effect = "Luck Boost"},
-        ["Basic Capacity Potion"]    = {Price = 8000,    Zone = "RiverTown",    Effect = "Capacity Boost"},
-        ["Greater Luck Potion"]      = {Price = 50000,   Zone = "RiverTown",    Effect = "High Luck Boost"},
-        ["Greater Capacity Potion"]  = {Price = 60000,   Zone = "RiverTown",    Effect = "High Capacity Boost"},
-        ["Merchant's Potion"]        = {Price = 120000,  Zone = "RiverTown",    Effect = "Better Shop Rates"},
-        ["Frozen Luck Potion"]       = {Price = 90000,   Zone = "FrozenPeak",   Effect = "Ice Luck Boost"},
-        ["Frozen Speed Potion"]      = {Price = 85000,   Zone = "FrozenPeak",   Effect = "Speed Boost"},
-        ["Cosmic Potion"]            = {Price = 200000,  Zone = "MeteorValley", Effect = "Cosmic Luck"},
-        ["Supreme Luck Potion"]      = {Price = 500000,  Zone = "Volcano",      Effect = "Ultra Luck"},
-        ["Volcanic Luck Potion"]     = {Price = 450000,  Zone = "Volcano",      Effect = "Fire Luck"},
-        ["Volcanic Strength Potion"] = {Price = 470000,  Zone = "Volcano",      Effect = "Strength Boost"},
+        ["Basic Luck Potion"]        = { Price = 5000,    Zone = "RiverTown",    Effect = "Luck Boost"            },
+        ["Basic Capacity Potion"]    = { Price = 8000,    Zone = "RiverTown",    Effect = "Capacity Boost"        },
+        ["Greater Luck Potion"]      = { Price = 50000,   Zone = "RiverTown",    Effect = "High Luck Boost"       },
+        ["Greater Capacity Potion"]  = { Price = 60000,   Zone = "RiverTown",    Effect = "High Capacity Boost"   },
+        ["Merchant's Potion"]        = { Price = 120000,  Zone = "RiverTown",    Effect = "Better Shop Rates"     },
+        ["Frozen Luck Potion"]       = { Price = 90000,   Zone = "FrozenPeak",   Effect = "Ice Luck Boost"        },
+        ["Frozen Speed Potion"]      = { Price = 85000,   Zone = "FrozenPeak",   Effect = "Speed Boost"           },
+        ["Cosmic Potion"]            = { Price = 200000,  Zone = "MeteorValley", Effect = "Cosmic Luck"           },
+        ["Supreme Luck Potion"]      = { Price = 500000,  Zone = "Volcano",      Effect = "Ultra Luck"            },
+        ["Volcanic Luck Potion"]     = { Price = 450000,  Zone = "Volcano",      Effect = "Fire Luck"             },
+        ["Volcanic Strength Potion"] = { Price = 470000,  Zone = "Volcano",      Effect = "Strength Boost"        },
     },
     Items = {
-        ["Wood Sluice Box"]     = {Price = 0,            Zone = "StarterTown"},
-        ["Steel Sluice Box"]    = {Price = 15000,        Zone = "StarterTown"},
-        ["Gold Sluice Box"]     = {Price = 50000,        Zone = "StarterTown"},
-        ["Arctic Sluice"]       = {Price = 80000,        Zone = "FrozenPeak"},
-        ["Corroded Sluice"]     = {Price = 120000,       Zone = "Swamp"},
-        ["Enchanted Sluice"]    = {Price = 200000000,    Zone = "Cavern"},
-        ["Obsidian Sluice Box"] = {Price = 250000000,    Zone = "Cavern"},
-        ["Lifetouched Sluice"]  = {Price = 80000000000,  Zone = "Grotto"},
-        ["Starblossom Sluice"]  = {Price = 50000000,     Zone = "MeteorValley"},
-        ["Luck Totem"]          = {Price = 150000,       Zone = "RiverTown"},
-        ["Strength Totem"]      = {Price = 200000,       Zone = "RiverTown"},
-        ["Luminant Totem"]      = {Price = 250000,       Zone = "Swamp"},
-        ["The Excavator"]       = {Price = 320000,       Zone = "RiverTown"},
-        ["Starcrusher"]         = {Price = 60000000,     Zone = "MeteorValley"},
-        ["Stardust Shake"]      = {Price = 30000000,     Zone = "MeteorValley"},
-        ["Ambrosia"]            = {Price = 100000,       Zone = "Swamp"},
-        ["Witches Brew"]        = {Price = 90000,        Zone = "Swamp"},
-        ["Spirit Orb"]          = {Price = 75000,        Zone = "NorthPole"},
-        ["Snow Globe"]          = {Price = 50000,        Zone = "NorthPole"},
-        ["XP Cookie"]           = {Price = 30000,        Zone = "NorthPole"},
-        ["Gingerbread Cookie"]  = {Price = 25000,        Zone = "NorthPole"},
-        ["Festive Catalyst"]    = {Price = 120000,       Zone = "NorthPole"},
+        ["Wood Sluice Box"]     = { Price = 0,            Zone = "StarterTown"  },
+        ["Steel Sluice Box"]    = { Price = 15000,        Zone = "StarterTown"  },
+        ["Gold Sluice Box"]     = { Price = 50000,        Zone = "StarterTown"  },
+        ["Arctic Sluice"]       = { Price = 80000,        Zone = "FrozenPeak"   },
+        ["Corroded Sluice"]     = { Price = 120000,       Zone = "Swamp"        },
+        ["Enchanted Sluice"]    = { Price = 200000000,    Zone = "Cavern"       },
+        ["Obsidian Sluice Box"] = { Price = 250000000,    Zone = "Cavern"       },
+        ["Lifetouched Sluice"]  = { Price = 80000000000,  Zone = "Grotto"       },
+        ["Starblossom Sluice"]  = { Price = 50000000,     Zone = "MeteorValley" },
+        ["Luck Totem"]          = { Price = 150000,       Zone = "RiverTown"    },
+        ["Strength Totem"]      = { Price = 200000,       Zone = "RiverTown"    },
+        ["Luminant Totem"]      = { Price = 250000,       Zone = "Swamp"        },
+        ["The Excavator"]       = { Price = 320000,       Zone = "RiverTown"    },
+        ["Starcrusher"]         = { Price = 60000000,     Zone = "MeteorValley" },
+        ["Stardust Shake"]      = { Price = 30000000,     Zone = "MeteorValley" },
+        ["Ambrosia"]            = { Price = 100000,       Zone = "Swamp"        },
+        ["Witches Brew"]        = { Price = 90000,        Zone = "Swamp"        },
+        ["Spirit Orb"]          = { Price = 75000,        Zone = "NorthPole"    },
+        ["Snow Globe"]          = { Price = 50000,        Zone = "NorthPole"    },
+        ["XP Cookie"]           = { Price = 30000,        Zone = "NorthPole"    },
+        ["Gingerbread Cookie"]  = { Price = 25000,        Zone = "NorthPole"    },
+        ["Festive Catalyst"]    = { Price = 120000,       Zone = "NorthPole"    },
     },
 }
 
+-- ── HELPERS ──────────────────────────────────────────
 local function formatPrice(n)
     if n == 0 then return "Free" end
-    if n >= 1000000000000 then return string.format("$%.1fT", n/1000000000000)
-    elseif n >= 1000000000 then return string.format("$%.1fB", n/1000000000)
-    elseif n >= 1000000    then return string.format("$%.1fM", n/1000000)
-    elseif n >= 1000       then return string.format("$%.1fK", n/1000)
-    else return "$"..n end
+    if     n >= 1e12 then return string.format("$%.1fT", n / 1e12)
+    elseif n >= 1e9  then return string.format("$%.1fB", n / 1e9)
+    elseif n >= 1e6  then return string.format("$%.1fM", n / 1e6)
+    elseif n >= 1e3  then return string.format("$%.1fK", n / 1e3)
+    else                  return "$" .. n
+    end
 end
+
+local function sortedKeys(tbl, pricePath)
+    local keys = {}
+    for k in pairs(tbl) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b)
+        return (pricePath(tbl[a])) < (pricePath(tbl[b]))
+    end)
+    return keys
+end
+
+local getPrice = function(d) return d.Price end
 
 local function buyItem(itemName, itemData)
     local ok, err = pcall(function()
         local shopItem = workspace
-            :WaitForChild("Purchasable")
-            :WaitForChild(itemData.Zone)
-            :WaitForChild(itemName)
-            :WaitForChild("ShopItem")
-        ReplicatedStorage
-            :WaitForChild("Remotes")
-            :WaitForChild("Shop")
-            :WaitForChild("BuyItem")
-            :InvokeServer(shopItem, 1)
+            :WaitForChild("Purchasable", 5)
+            :WaitForChild(itemData.Zone,  5)
+            :WaitForChild(itemName,       5)
+            :WaitForChild("ShopItem",     5)
+        local buyRemote = getShopRemote("BuyItem")
+        if not buyRemote then error("BuyItem remote not found") end
+        buyRemote:InvokeServer(shopItem, 1)
     end)
     if ok then
-        Mixusfield:Notify({ Title = "Purchased!", Content = itemName.." bought from "..itemData.Zone, Type = "success" })
+        Mixusfield:Notify({
+            Title   = "Purchased!",
+            Content = itemName .. " bought from " .. itemData.Zone,
+            Type    = "success",
+        })
     else
-        Mixusfield:Notify({ Title = "Purchase Failed", Content = tostring(err), Type = "error" })
+        Mixusfield:Notify({
+            Title   = "Purchase Failed",
+            Content = tostring(err),
+            Type    = "error",
+        })
     end
 end
 
--- =====================================================
--- WINDOW
--- =====================================================
+local function buildPriceList(category, list, extraFn)
+    local t = {}
+    for _, n in ipairs(list) do
+        local d    = category[n]
+        local line = n .. " → " .. formatPrice(d.Price) .. " [" .. d.Zone .. "]"
+        if extraFn then line = line .. extraFn(d) end
+        t[#t + 1] = line
+    end
+    return table.concat(t, "\n")
+end
+
+-- ── WINDOW ───────────────────────────────────────────
 local Window = Mixusfield:CreateWindow({
     Name         = "Prospecting Hub",
     Subtitle     = "v5",
@@ -356,11 +339,6 @@ local Main = Window:CreateTab({
 -- ── AUTO PROSPECT ────────────────────────────────────
 Main:CreateSection({ Name = "⛏️ Auto Prospect" })
 
-Main:CreateParagraph({
-    Title   = "How Auto Prospect Works",
-    Content = "1. Fires Collect remote (picks up sand)\n2. Finds nearest sand deposit → teleports to it\n3. Fires Pan + Shake remotes\n4. Returns to original position\n5. Repeats on the set interval",
-})
-
 Main:CreateToggle({
     Name     = "Auto Prospect",
     Default  = false,
@@ -368,7 +346,22 @@ Main:CreateToggle({
         AutoProspect = v
         Mixusfield:Notify({
             Title   = "Auto Prospect",
-            Content = v and "Auto Prospect enabled" or "Auto Prospect disabled",
+            Content = v and "Started — running every " .. ProspectDelay .. "s"
+                        or "Stopped.",
+            Type    = v and "success" or "info",
+        })
+    end,
+})
+
+Main:CreateToggle({
+    Name     = "⚡ Burst Mode  (faster, fires " .. BurstCount .. "x per cycle)",
+    Default  = false,
+    Callback = function(v)
+        BurstMode = v
+        Mixusfield:Notify({
+            Title   = "Burst Mode",
+            Content = v and "ON — fires " .. BurstCount .. "x per cycle"
+                        or "OFF — single fire per cycle",
             Type    = v and "success" or "info",
         })
     end,
@@ -376,35 +369,57 @@ Main:CreateToggle({
 
 Main:CreateSlider({
     Name      = "Prospect Speed",
-    Min       = 0.1,
+    Min       = 0.05,     -- faster minimum vs old 0.1
     Max       = 2,
-    Default   = 1,
-    Increment = 0.1,
+    Default   = 0.5,
+    Increment = 0.05,
     Suffix    = "s",
-    Callback  = function(v) ProspectDelay = v end,
+    Callback  = function(v)
+        ProspectDelay = v
+    end,
+})
+
+Main:CreateSlider({
+    Name      = "Burst Count",
+    Min       = 1,
+    Max       = 10,
+    Default   = 3,
+    Increment = 1,
+    Suffix    = "x",
+    Callback  = function(v)
+        BurstCount = v
+    end,
 })
 
 Main:CreateButton({
     Name     = "Prospect Once",
     Callback = function()
-        task.spawn(prospectOnce)
-        Mixusfield:Notify({ Title = "Prospect", Content = "One cycle fired.", Type = "success" })
+        task.spawn(function()
+            local ok = BurstMode and prospectBurst() or prospectOnce()
+            Mixusfield:Notify({
+                Title   = ok and "Done" or "No Pan Found",
+                Content = ok and "Prospect fired."
+                             or "Equip a pan first.",
+                Type    = ok and "success" or "warning",
+            })
+        end)
     end,
 })
 
 -- ── COMPLETE ALL ─────────────────────────────────────
 Main:CreateSection({ Name = "✅ Complete All" })
 
-Main:CreateParagraph({
-    Title   = "Complete All Info",
-    Content = "Runs one full prospect cycle (collect → teleport to sand → shake → return) then immediately sells everything in your backpack.",
-})
-
 Main:CreateButton({
     Name     = "Complete All  (Prospect + Sell)",
     Callback = function()
-        task.spawn(completeAll)
-        Mixusfield:Notify({ Title = "Complete All", Content = "Running prospect then selling…", Type = "info" })
+        task.spawn(function()
+            completeAll()
+            Mixusfield:Notify({
+                Title   = "Complete All",
+                Content = "Prospected then sold!",
+                Type    = "success",
+            })
+        end)
     end,
 })
 
@@ -412,16 +427,27 @@ Main:CreateButton({
 Main:CreateSection({ Name = "💰 Sell" })
 
 Main:CreateToggle({
-    Name     = "Auto Sell",
+    Name     = "Auto Sell  (every " .. SellInterval .. "s)",
     Default  = false,
     Callback = function(v)
         AutoSell = v
         Mixusfield:Notify({
             Title   = "Auto Sell",
-            Content = v and "Auto Sell ON — fires every 3s" or "Auto Sell OFF",
+            Content = v and "ON — selling every " .. SellInterval .. "s"
+                        or "OFF",
             Type    = v and "success" or "info",
         })
     end,
+})
+
+Main:CreateSlider({
+    Name      = "Sell Interval",
+    Min       = 1,
+    Max       = 30,
+    Default   = 3,
+    Increment = 1,
+    Suffix    = "s",
+    Callback  = function(v) SellInterval = v end,
 })
 
 Main:CreateButton({
@@ -432,7 +458,7 @@ Main:CreateButton({
     end,
 })
 
--- ── WALK SPEED ───────────────────────────────────────
+-- ── PLAYER ───────────────────────────────────────────
 Main:CreateSection({ Name = "🏃 Player" })
 
 Main:CreateSlider({
@@ -453,23 +479,25 @@ Main:CreateButton({
     Callback = function()
         local hum = getHumanoid()
         if hum then hum.WalkSpeed = 16 end
-        Mixusfield:Notify({ Title = "Speed Reset", Content = "Walk speed set to 16.", Type = "info" })
+        Mixusfield:Notify({ Title = "Speed Reset", Content = "Walk speed → 16.", Type = "info" })
     end,
 })
 
 -- =====================================================
--- TAB: TELEPORT  (manual, independent from Auto Prospect)
+-- TAB: TELEPORT
 -- =====================================================
 local Teleport = Window:CreateTab({
     Name = "Teleport",
     Icon = { Type = "Lucide", Source = "navigation" },
 })
 
-Teleport:CreateSection({ Name = "🚀 Manual Teleport" })
+Teleport:CreateSection({ Name = "🚀 Teleport Settings" })
 
 Teleport:CreateParagraph({
-    Title   = "Note",
-    Content = "This tab is for manual forward teleporting only.\nAuto Prospect handles its own teleport to sand deposits automatically — this tab does not affect it.",
+    Title   = "How It Works",
+    Content = "Teleport is fully independent from Auto Prospect.\n"
+           .. "Press the button to move forward, wait, then snap back.\n"
+           .. "Auto Prospect fires its remotes separately.",
 })
 
 Teleport:CreateSlider({
@@ -489,7 +517,10 @@ Teleport:CreateSlider({
     Default   = 2,
     Increment = 1,
     Suffix    = "s",
-    Callback  = function(v) TeleportTimer = v end,
+    Callback  = function(v)
+        TeleportTimer = v
+        Mixusfield:Notify({ Title = "Timer Set", Content = "Hold time: " .. v .. "s", Type = "info" })
+    end,
 })
 
 Teleport:CreateButton({
@@ -504,7 +535,11 @@ Teleport:CreateButton({
         local frontCF    = getFrontPosition(TeleportStuds)
         if frontCF then
             teleportTo(frontCF)
-            Mixusfield:Notify({ Title = "Teleported", Content = "Moved "..TeleportStuds.." studs. Returning in "..TeleportTimer.."s…", Type = "info" })
+            Mixusfield:Notify({
+                Title   = "Teleported",
+                Content = "Moved " .. TeleportStuds .. " studs. Returning in " .. TeleportTimer .. "s…",
+                Type    = "info",
+            })
             task.wait(TeleportTimer)
             teleportTo(originalCF)
             Mixusfield:Notify({ Title = "Returned", Content = "Back to original spot.", Type = "success" })
@@ -520,98 +555,91 @@ local Shop = Window:CreateTab({
     Icon = { Type = "Lucide", Source = "shopping-cart" },
 })
 
--- ── PANS ────────────────────────────────────────────
+-- ── PANS ─────────────────────────────────────────────
 Shop:CreateSection({ Name = "🍳 Pans" })
-local panList = {}
-for name in pairs(ShopItems.Pans) do table.insert(panList, name) end
-table.sort(panList, function(a, b) return ShopItems.Pans[a].Price < ShopItems.Pans[b].Price end)
+local panList     = sortedKeys(ShopItems.Pans,    getPrice)
 local selectedPan = panList[1]
 
 Shop:CreateDropdown({ Name = "Select Pan", Options = panList, Callback = function(v) selectedPan = v end })
 Shop:CreateButton({
     Name = "Buy Pan",
     Callback = function()
-        if not selectedPan then Mixusfield:Notify({ Title = "No Pan", Content = "Select a pan first.", Type = "warning" }) return end
+        if not selectedPan then
+            Mixusfield:Notify({ Title = "No Pan", Content = "Select a pan first.", Type = "warning" })
+            return
+        end
         buyItem(selectedPan, ShopItems.Pans[selectedPan])
     end,
 })
-do
-    local t = ""
-    for _, n in ipairs(panList) do
-        t = t..n.." → "..formatPrice(ShopItems.Pans[n].Price).." ["..ShopItems.Pans[n].Zone.."]\n"
-    end
-    Shop:CreateParagraph({ Title = "Pan Prices", Content = t })
-end
+Shop:CreateParagraph({
+    Title   = "Pan Prices",
+    Content = buildPriceList(ShopItems.Pans, panList),
+})
 
--- ── SHOVELS ─────────────────────────────────────────
+-- ── SHOVELS ──────────────────────────────────────────
 Shop:CreateSection({ Name = "⛏️ Shovels" })
-local shovelList = {}
-for name in pairs(ShopItems.Shovels) do table.insert(shovelList, name) end
-table.sort(shovelList, function(a, b) return ShopItems.Shovels[a].Price < ShopItems.Shovels[b].Price end)
+local shovelList     = sortedKeys(ShopItems.Shovels, getPrice)
 local selectedShovel = shovelList[1]
 
 Shop:CreateDropdown({ Name = "Select Shovel", Options = shovelList, Callback = function(v) selectedShovel = v end })
 Shop:CreateButton({
     Name = "Buy Shovel",
     Callback = function()
-        if not selectedShovel then Mixusfield:Notify({ Title = "No Shovel", Content = "Select a shovel first.", Type = "warning" }) return end
+        if not selectedShovel then
+            Mixusfield:Notify({ Title = "No Shovel", Content = "Select a shovel first.", Type = "warning" })
+            return
+        end
         buyItem(selectedShovel, ShopItems.Shovels[selectedShovel])
     end,
 })
-do
-    local t = ""
-    for _, n in ipairs(shovelList) do
-        t = t..n.." → "..formatPrice(ShopItems.Shovels[n].Price).." ["..ShopItems.Shovels[n].Zone.."]\n"
-    end
-    Shop:CreateParagraph({ Title = "Shovel Prices", Content = t })
-end
+Shop:CreateParagraph({
+    Title   = "Shovel Prices",
+    Content = buildPriceList(ShopItems.Shovels, shovelList),
+})
 
--- ── POTIONS ─────────────────────────────────────────
+-- ── POTIONS ──────────────────────────────────────────
 Shop:CreateSection({ Name = "🧪 Potions" })
-local potionList = {}
-for name in pairs(ShopItems.Potions) do table.insert(potionList, name) end
-table.sort(potionList, function(a, b) return ShopItems.Potions[a].Price < ShopItems.Potions[b].Price end)
+local potionList     = sortedKeys(ShopItems.Potions, getPrice)
 local selectedPotion = potionList[1]
 
 Shop:CreateDropdown({ Name = "Select Potion", Options = potionList, Callback = function(v) selectedPotion = v end })
 Shop:CreateButton({
     Name = "Buy Potion",
     Callback = function()
-        if not selectedPotion then Mixusfield:Notify({ Title = "No Potion", Content = "Select a potion first.", Type = "warning" }) return end
+        if not selectedPotion then
+            Mixusfield:Notify({ Title = "No Potion", Content = "Select a potion first.", Type = "warning" })
+            return
+        end
         buyItem(selectedPotion, ShopItems.Potions[selectedPotion])
     end,
 })
-do
-    local t = ""
-    for _, n in ipairs(potionList) do
-        local d = ShopItems.Potions[n]
-        t = t..n.." → "..formatPrice(d.Price).." | "..d.Effect.." ["..d.Zone.."]\n"
-    end
-    Shop:CreateParagraph({ Title = "Potion Prices & Effects", Content = t })
-end
+Shop:CreateParagraph({
+    Title   = "Potion Prices & Effects",
+    Content = buildPriceList(ShopItems.Potions, potionList, function(d)
+        return " | " .. d.Effect
+    end),
+})
 
--- ── ITEMS ───────────────────────────────────────────
+-- ── ITEMS ─────────────────────────────────────────────
 Shop:CreateSection({ Name = "📦 Items / Sluices / Specials" })
-local itemList = {}
-for name in pairs(ShopItems.Items) do table.insert(itemList, name) end
-table.sort(itemList, function(a, b) return ShopItems.Items[a].Price < ShopItems.Items[b].Price end)
+local itemList       = sortedKeys(ShopItems.Items, getPrice)
 local selectedShopItem = itemList[1]
 
 Shop:CreateDropdown({ Name = "Select Item", Options = itemList, Callback = function(v) selectedShopItem = v end })
 Shop:CreateButton({
     Name = "Buy Item",
     Callback = function()
-        if not selectedShopItem then Mixusfield:Notify({ Title = "No Item", Content = "Select an item first.", Type = "warning" }) return end
+        if not selectedShopItem then
+            Mixusfield:Notify({ Title = "No Item", Content = "Select an item first.", Type = "warning" })
+            return
+        end
         buyItem(selectedShopItem, ShopItems.Items[selectedShopItem])
     end,
 })
-do
-    local t = ""
-    for _, n in ipairs(itemList) do
-        t = t..n.." → "..formatPrice(ShopItems.Items[n].Price).." ["..ShopItems.Items[n].Zone.."]\n"
-    end
-    Shop:CreateParagraph({ Title = "Item Prices", Content = t })
-end
+Shop:CreateParagraph({
+    Title   = "Item Prices",
+    Content = buildPriceList(ShopItems.Items, itemList),
+})
 
 -- =====================================================
 -- TAB: SETTINGS
@@ -629,32 +657,51 @@ Settings:CreateDropdown({
     Default = "Dark",
     Callback = function(v)
         pcall(function() Mixusfield:SetTheme(v) end)
-        pcall(function() Window:SetTheme(v) end)
-        Mixusfield:Notify({ Title = "Theme", Content = "Now using: "..v, Type = "success" })
+        pcall(function() Window:SetTheme(v)     end)
+        Mixusfield:Notify({ Title = "Theme", Content = "Now using: " .. v, Type = "success" })
     end,
 })
 
 Settings:CreateSection({ Name = "⚙️ System" })
 
 Settings:CreateParagraph({
-    Title   = "Hub Info v5",
-    Content = "✔ Auto Prospect: Collect → teleport to sand → Shake → return → repeat\n✔ Prospect Speed: 0.1 – 2s\n✔ Complete All: full cycle + sell\n✔ Auto Sell: every 3s\n✔ Walk Speed: 16 – 300\n✔ Manual Teleport: 1–50 studs, 1–10s hold\n✔ Shop: Pans, Shovels, Potions, Items\n✔ Theme changer\n✔ All systems stable",
+    Title   = "Hub Info  v5",
+    Content =
+        "✔ Auto Prospect — fires Collect + Pan + Shake directly\n"
+     .. "✔ Prospect Speed — 0.05s to 2s (faster than before)\n"
+     .. "✔ Burst Mode — fires up to 10× per cycle\n"
+     .. "✔ Auto Sell — configurable interval 1–30s\n"
+     .. "✔ Complete All — burst prospect then instant sell\n"
+     .. "✔ Teleport — independent, snap forward & return\n"
+     .. "✔ Walk Speed — 16 to 300\n"
+     .. "✔ Shop — Pans, Shovels, Potions, Items\n"
+     .. "✔ Remote caching — remotes fetched once for speed\n"
+     .. "✔ Pan caching — auto-refreshes when pan changes\n"
+     .. "✔ Theme changer — 8 themes\n"
+     .. "✔ All systems stable",
 })
 
 Settings:CreateButton({
     Name     = "Reset All to Defaults",
     Callback = function()
-        AutoProspect    = false
-        AutoSell        = false
-        ProspectDelay   = 1
-        TeleportStuds   = 10
-        TeleportTimer   = 2
-        local hum = getHumanoid()
-        if hum then hum.WalkSpeed = 16 end
+        AutoProspect     = false
+        AutoSell         = false
+        BurstMode        = false
+        ProspectDelay    = 0.5
+        BurstCount       = 3
+        SellInterval     = 3
+        TeleportStuds    = 10
+        TeleportTimer    = 2
         selectedPan      = panList[1]
         selectedShovel   = shovelList[1]
         selectedPotion   = potionList[1]
         selectedShopItem = itemList[1]
+        local hum = getHumanoid()
+        if hum then hum.WalkSpeed = 16 end
+        -- clear remote caches so they re-fetch cleanly
+        _remotes     = nil
+        _sellRemote  = nil
+        _cachedPan   = nil
         Mixusfield:Notify({ Title = "Reset", Content = "All settings back to default.", Type = "info" })
     end,
 })
