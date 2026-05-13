@@ -4,6 +4,7 @@ local Mixusfield = loadstring(game:HttpGet(
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 -- =========================
@@ -12,6 +13,8 @@ local player = Players.LocalPlayer
 local AutoProspect = false
 local AutoSell = false
 local Delay = 1
+local TeleportStuds = 10
+local CurrentTheme = "Dark"
 
 -- =========================
 -- TOOL DETECTION
@@ -27,7 +30,45 @@ local function getPan()
 end
 
 -- =========================
--- PROSPECT ACTION
+-- TELEPORT HELPERS
+-- =========================
+local function getHRP()
+    local char = player.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function teleportTo(cf)
+    local hrp = getHRP()
+    if hrp then
+        hrp.CFrame = cf
+    end
+end
+
+-- Returns a CFrame that is `studs` in front of the player (X/Z only, same Y)
+local function getFrontCFrame(studs)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local pos = hrp.Position
+    local lookFlat = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z).Unit
+    local newPos = pos + lookFlat * studs
+    return CFrame.new(newPos) * (hrp.CFrame - hrp.CFrame.Position):Inverse():Inverse()
+        -- simplified: keep same rotation
+end
+
+-- Proper flat-forward teleport keeping Y and rotation
+local function getFrontPosition(studs)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local cf = hrp.CFrame
+    local look = cf.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z).Unit
+    local newPos = cf.Position + flatLook * studs
+    return CFrame.new(newPos, newPos + flatLook)
+end
+
+-- =========================
+-- PROSPECT ACTION WITH TELEPORT
 -- =========================
 local function prospectOnce()
     local pan = getPan()
@@ -40,6 +81,20 @@ local function prospectOnce()
     local shake = scripts:FindFirstChild("Shake")
     local panRemote = scripts:FindFirstChild("Pan")
 
+    -- Save original position BEFORE teleporting
+    local hrp = getHRP()
+    local originalCF = hrp and hrp.CFrame or nil
+
+    -- Teleport forward
+    if originalCF then
+        local frontCF = getFrontPosition(TeleportStuds)
+        if frontCF then
+            teleportTo(frontCF)
+            task.wait(0.1)
+        end
+    end
+
+    -- Fire remotes
     if collect and collect:IsA("RemoteFunction") then
         pcall(function() collect:InvokeServer(1, true) end)
     end
@@ -48,6 +103,14 @@ local function prospectOnce()
     end
     if shake and shake:IsA("RemoteEvent") then
         pcall(function() shake:FireServer() end)
+    end
+
+    -- Small wait for shake animation
+    task.wait(0.3)
+
+    -- Return to original position
+    if originalCF then
+        teleportTo(originalCF)
     end
 end
 
@@ -184,7 +247,7 @@ local function formatPrice(n)
 end
 
 -- =========================
--- BUY FUNCTION (FIXED)
+-- BUY FUNCTION
 -- =========================
 local function buyItem(itemName, itemData)
     local success, result = pcall(function()
@@ -222,7 +285,7 @@ end
 local Window = Mixusfield:CreateWindow({
     Name = "Prospecting Hub",
     Subtitle = "Full System Build",
-    Theme = "Dark",
+    Theme = CurrentTheme,
     ToggleButton = { Enabled = true }
 })
 
@@ -241,11 +304,16 @@ Main:CreateToggle({
     Default = false,
     Callback = function(v)
         AutoProspect = v
+        Mixusfield:Notify({
+            Title = "Auto Prospect",
+            Content = v and "Auto Prospect enabled" or "Auto Prospect disabled",
+            Type = v and "success" or "info",
+        })
     end,
 })
 
 Main:CreateSlider({
-    Name = "Speed",
+    Name = "Prospect Speed",
     Min = 0.2,
     Max = 3,
     Default = 1,
@@ -256,15 +324,7 @@ Main:CreateSlider({
     end,
 })
 
--- =========================
--- FARM TAB
--- =========================
-local Farm = Window:CreateTab({
-    Name = "Farm",
-    Icon = { Type = "Lucide", Source = "activity" },
-})
-
-Farm:CreateButton({
+Main:CreateButton({
     Name = "Manual Prospect",
     Callback = function()
         prospectOnce()
@@ -274,6 +334,66 @@ Farm:CreateButton({
             Type = "success",
         })
     end,
+})
+
+-- =========================
+-- TELEPORT TAB
+-- =========================
+local Teleport = Window:CreateTab({
+    Name = "Teleport",
+    Icon = { Type = "Lucide", Source = "navigation" },
+})
+
+Teleport:CreateSection({ Name = "🚀 Auto Prospect Teleport" })
+
+Teleport:CreateParagraph({
+    Title = "How It Works",
+    Content = "When Auto Prospect is active, before each pan shake the script teleports you forward by the set number of studs (X/Z only, Y stays the same). After the shake is done, you are returned to your original position automatically."
+})
+
+Teleport:CreateSlider({
+    Name = "Forward Studs (X/Z only)",
+    Min = 1,
+    Max = 50,
+    Default = 10,
+    Increment = 1,
+    Suffix = " studs",
+    Callback = function(v)
+        TeleportStuds = v
+    end,
+})
+
+Teleport:CreateButton({
+    Name = "Test Teleport Forward",
+    Callback = function()
+        local hrp = getHRP()
+        if not hrp then
+            Mixusfield:Notify({ Title = "Error", Content = "Character not found.", Type = "error" })
+            return
+        end
+        local originalCF = hrp.CFrame
+        local frontCF = getFrontPosition(TeleportStuds)
+        if frontCF then
+            teleportTo(frontCF)
+            Mixusfield:Notify({
+                Title = "Teleported",
+                Content = "Moved " .. TeleportStuds .. " studs forward. Returning in 1s...",
+                Type = "info",
+            })
+            task.wait(1)
+            teleportTo(originalCF)
+            Mixusfield:Notify({
+                Title = "Returned",
+                Content = "Back to original position.",
+                Type = "success",
+            })
+        end
+    end,
+})
+
+Teleport:CreateParagraph({
+    Title = "Notes",
+    Content = "• Only moves on X and Z axes (no Y/height change)\n• Max stud range: 50\n• Min stud range: 1\n• Position is restored after every pan action\n• Works alongside Auto Prospect automatically"
 })
 
 -- =========================
@@ -465,17 +585,47 @@ local Settings = Window:CreateTab({
     Icon = { Type = "Lucide", Source = "settings" },
 })
 
+Settings:CreateSection({ Name = "🎨 Theme" })
+
+Settings:CreateDropdown({
+    Name = "UI Theme",
+    Options = {
+        "Dark",
+        "Light",
+        "Midnight",
+        "Ocean",
+        "Forest",
+        "Sunset",
+        "Candy",
+        "Rose",
+    },
+    Callback = function(v)
+        CurrentTheme = v
+        pcall(function()
+            Window:SetTheme(v)
+        end)
+        Mixusfield:Notify({
+            Title = "Theme Changed",
+            Content = "Theme set to: " .. v,
+            Type = "success",
+        })
+    end,
+})
+
+Settings:CreateSection({ Name = "⚙️ System" })
+
 Settings:CreateParagraph({
     Title = "System Status",
-    Content = "✔ Full hub loaded\n✔ Prospect system active\n✔ Shop system active\n✔ Sell system active\n✔ UI stable\n✔ Modular design"
+    Content = "✔ Full hub loaded\n✔ Prospect system active\n✔ Teleport system active\n✔ Shop system active\n✔ Sell system active\n✔ Theme changer active\n✔ UI stable"
 })
 
 Settings:CreateButton({
-    Name = "Reset Systems",
+    Name = "Reset All Systems",
     Callback = function()
         AutoProspect = false
         AutoSell = false
         Delay = 1
+        TeleportStuds = 10
         selectedPan = panList[1]
         selectedShovel = shovelList[1]
         selectedPotion = potionList[1]
