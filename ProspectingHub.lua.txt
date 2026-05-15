@@ -24,6 +24,7 @@ local Window = Mixusfield:CreateWindow({
     },
 
     -- Uncomment below to enable key system:
+--[[
     KeySystem = {
         Title       = "Key Required",
         Subtitle    = "Enter your key to continue",
@@ -36,6 +37,7 @@ local Window = Mixusfield:CreateWindow({
             { Name = "Gateway 2", URL = "https://example.com/key2" },
         },
     },
+]]--
 })
 
 -- ════════════════════════════════════════════════════════
