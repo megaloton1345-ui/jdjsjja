@@ -1,5 +1,5 @@
 local Mixusfield = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua.txt"
+    "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua"
 ))()
 
 local Players = game:GetService("Players")
@@ -8,13 +8,14 @@ local player  = Players.LocalPlayer
 -- =========================
 -- SYSTEM STATE
 -- =========================
-local AutoProspect     = false
-local Delay            = 1
+local AutoProspect        = false
+local ProspectDelay       = 0.5   -- seconds between each auto prospect tick
 
 local teleportLoopActive  = false
 local teleportLoopThread  = nil
 local teleportTarget      = ""
-local teleportDelay       = 3
+local teleportLoopDelay   = 10     -- seconds between each loop teleport
+local teleportOffsetStuds = 3     -- studs IN FRONT of target you land
 
 -- =========================
 -- TOOL DETECTION
@@ -55,13 +56,14 @@ local function prospectOnce()
 end
 
 -- Auto prospect background loop
+-- ProspectDelay is clamped to minimum 0.01s so it can go super fast
 task.spawn(function()
     while true do
         if AutoProspect then
             prospectOnce()
-            task.wait(Delay)
+            task.wait(math.max(0.01, ProspectDelay))
         else
-            task.wait(0.25)
+            task.wait(0.1)
         end
     end
 end)
@@ -79,6 +81,9 @@ local function findPlayer(name)
     return nil
 end
 
+-- Teleports YOU to a position IN FRONT of the target.
+-- "In front" = along the target's LookVector * teleportOffsetStuds studs.
+-- You are rotated to face back toward the target (so you look at each other).
 local function doTeleport()
     if teleportTarget == "" then
         Mixusfield:Notify({
@@ -129,8 +134,16 @@ local function doTeleport()
         return false
     end
 
-    localChar.HumanoidRootPart.CFrame =
-        targetChar.HumanoidRootPart.CFrame * CFrame.new(2, 0, 0)
+    local targetRoot = targetChar.HumanoidRootPart
+
+    -- Step 1: get the target's forward direction (LookVector)
+    -- Step 2: move that many studs in front of them
+    -- Step 3: rotate you 180° so you face back at them
+    local lookDir    = targetRoot.CFrame.LookVector
+    local landPos    = targetRoot.Position + (lookDir * teleportOffsetStuds)
+    local facingCF   = CFrame.new(landPos, targetRoot.Position) -- look at target
+
+    localChar.HumanoidRootPart.CFrame = facingCF
     return true
 end
 
@@ -221,10 +234,10 @@ local ShopItems = {
 -- =========================
 local function formatPrice(n)
     if n == 0 then return "Free" end
-    if n >= 1000000000000 then return string.format("$%.1fT", n / 1000000000000)
-    elseif n >= 1000000000 then return string.format("$%.1fB", n / 1000000000)
-    elseif n >= 1000000    then return string.format("$%.1fM", n / 1000000)
-    elseif n >= 1000       then return string.format("$%.1fK", n / 1000)
+    if     n >= 1000000000000 then return string.format("$%.1fT", n / 1000000000000)
+    elseif n >= 1000000000    then return string.format("$%.1fB", n / 1000000000)
+    elseif n >= 1000000       then return string.format("$%.1fM", n / 1000000)
+    elseif n >= 1000          then return string.format("$%.1fK", n / 1000)
     else return "$" .. n end
 end
 
@@ -270,7 +283,7 @@ end
 -- =========================
 local Window = Mixusfield:CreateWindow({
     Name     = "Prospecting Hub",
-    Subtitle = "v1.1 — Full Build",
+    Subtitle = "v1.2 — Speed + Smart Teleport",
     Theme    = "Dark",
     ToggleButton = {
         Enabled = true,
@@ -302,16 +315,35 @@ Main:CreateToggle({
     end,
 })
 
+-- ── UPDATED: Super speed slider ──────────────────
+-- Slider goes 1–100 where the value IS the delay in hundredths of a second.
+-- 1  = 0.01s → absolute fastest possible
+-- 5  = 0.05s → super fast
+-- 10 = 0.10s → very fast (recommended)
+-- 50 = 0.50s → moderate
+-- 100 = 1.00s → slow / safe
+-- UI shows the value as "X/100 sec" so it's clear
 Main:CreateSlider({
-    Name      = "Prospect Speed",
-    Min       = 0.2,
-    Max       = 3,
-    Default   = 1,
-    Increment = 0.1,
-    Suffix    = " sec",
+    Name      = "Prospect Speed (1=fastest, 100=slowest)",
+    Min       = 1,
+    Max       = 100,
+    Default   = 10,
+    Increment = 1,
+    Suffix    = "/100 sec",
     Callback  = function(v)
-        Delay = v
+        -- v=1 → 0.01s, v=10 → 0.10s, v=100 → 1.00s
+        ProspectDelay = v / 100
     end,
+})
+
+Main:CreateParagraph({
+    Title   = "Speed Reference",
+    Content = "1  /100 sec = 0.01s  ← FASTEST (may lag)\n"
+            .. "5  /100 sec = 0.05s  ← Super fast\n"
+            .. "10 /100 sec = 0.10s  ← Recommended fast\n"
+            .. "50 /100 sec = 0.50s  ← Balanced\n"
+            .. "100/100 sec = 1.00s  ← Safe & slow\n\n"
+            .. "Lower number = more prospects per second.",
 })
 
 Main:CreateSection({ Name = "Manual" })
@@ -331,8 +363,8 @@ Main:CreateButton({
 
 Main:CreateSection({ Name = "Status" })
 
-Main:CreateLabel({ Name = "Hub loaded and running.",  Color = Color3.fromRGB(78, 205, 196) })
-Main:CreateLabel({ Name = "Version: 1.1.0",           Color = Color3.fromRGB(124, 107, 240) })
+Main:CreateLabel({ Name = "Hub v1.2 loaded and running.", Color = Color3.fromRGB(78, 205, 196) })
+Main:CreateLabel({ Name = "Version: 1.2.0",               Color = Color3.fromRGB(124, 107, 240) })
 
 -- ═══════════════════════════════════════════════
 -- TAB 2 — TELEPORT
@@ -354,6 +386,35 @@ TeleportTab:CreateTextbox({
     end,
 })
 
+-- ── UPDATED: Offset slider ────────────────────────
+-- Controls how many studs in FRONT of the target you land.
+-- You always face back at the target after teleporting.
+TeleportTab:CreateSlider({
+    Name      = "Distance From Target",
+    Min       = 0,
+    Max       = 20,
+    Default   = 3,
+    Increment = 1,
+    Suffix    = " studs",
+    Callback  = function(v)
+        teleportOffsetStuds = v
+    end,
+})
+
+TeleportTab:CreateParagraph({
+    Title   = "Distance Slider Guide",
+    Content = "Sets how many studs IN FRONT of the target you land.\n\n"
+            .. "0  studs = land exactly on the target\n"
+            .. "3  studs = right in front (default)\n"
+            .. "5  studs = comfortable gap\n"
+            .. "10 studs = further away\n"
+            .. "20 studs = furthest\n\n"
+            .. "You will always face the target after teleporting.",
+})
+
+-- ── Loop Settings ────────────────────────────────
+TeleportTab:CreateSection({ Name = "Loop Settings" })
+
 TeleportTab:CreateSlider({
     Name      = "Loop Delay",
     Min       = 1,
@@ -362,7 +423,7 @@ TeleportTab:CreateSlider({
     Increment = 1,
     Suffix    = " sec",
     Callback  = function(v)
-        teleportDelay = v
+        teleportLoopDelay = v
     end,
 })
 
@@ -376,7 +437,8 @@ TeleportTab:CreateButton({
         if doTeleport() then
             Mixusfield:Notify({
                 Title   = "Teleported!",
-                Content = "Teleported to " .. teleportTarget,
+                Content = "Landed " .. teleportOffsetStuds
+                    .. " studs in front of " .. teleportTarget .. ".",
                 Type    = "success",
             })
         end
@@ -394,7 +456,6 @@ TeleportTab:CreateToggle({
         teleportLoopActive = enabled
 
         if enabled then
-            -- guard: need a target first
             if teleportTarget == "" then
                 teleportLoopActive = false
                 Mixusfield:Notify({
@@ -407,20 +468,21 @@ TeleportTab:CreateToggle({
 
             Mixusfield:Notify({
                 Title   = "Loop Teleport ON",
-                Content = "Looping to " .. teleportTarget .. " every " .. teleportDelay .. "s.",
+                Content = "Looping to " .. teleportTarget
+                    .. " every " .. teleportLoopDelay .. "s"
+                    .. " (" .. teleportOffsetStuds .. " studs in front).",
                 Type    = "success",
             })
 
-            -- spawn the loop thread
             teleportLoopThread = task.spawn(function()
                 while teleportLoopActive do
                     doTeleport()
-                    task.wait(teleportDelay)
+                    task.wait(teleportLoopDelay)
                 end
             end)
 
         else
-            -- kill thread immediately — no waiting for next tick
+            -- Kill thread immediately, no delay
             if teleportLoopThread then
                 task.cancel(teleportLoopThread)
                 teleportLoopThread = nil
@@ -436,16 +498,11 @@ TeleportTab:CreateToggle({
 })
 
 -- ── Info ──────────────────────────────────────────
-TeleportTab:CreateSection({ Name = "How To Use" })
+TeleportTab:CreateSection({ Name = "Info" })
 
-TeleportTab:CreateParagraph({
-    Title   = "Teleport Loop Guide",
-    Content = "1. Type the target player's username in 'Target Username'.\n2. Set how often to teleport using 'Loop Delay' (1–30 sec).\n3. Toggle ON 'Enable Teleport Loop' — teleports automatically every X seconds.\n4. Toggle OFF at any time to stop instantly.",
-})
-
-TeleportTab:CreateLabel({ Name = "Toggle OFF stops the loop instantly.",        Color = Color3.fromRGB(78, 205, 196) })
-TeleportTab:CreateLabel({ Name = "Loop Delay range: 1 – 30 seconds.",           Color = Color3.fromRGB(255, 209, 102) })
-TeleportTab:CreateLabel({ Name = "Target must be in the same server as you.",   Color = Color3.fromRGB(255, 107, 107) })
+TeleportTab:CreateLabel({ Name = "Toggle OFF stops the loop instantly.",      Color = Color3.fromRGB(78, 205, 196) })
+TeleportTab:CreateLabel({ Name = "You always land IN FRONT of the target.",   Color = Color3.fromRGB(255, 209, 102) })
+TeleportTab:CreateLabel({ Name = "Target must be in the same server as you.", Color = Color3.fromRGB(255, 107, 107) })
 
 -- ═══════════════════════════════════════════════
 -- TAB 3 — SHOP
@@ -615,11 +672,12 @@ Settings:CreateButton({
     Name     = "Reset All Systems",
     Icon     = { Type = "Lucide", Source = "refresh-cw" },
     Callback = function()
-        AutoProspect      = false
-        Delay             = 1
-        teleportLoopActive = false
-        teleportTarget    = ""
-        teleportDelay     = 3
+        AutoProspect        = false
+        ProspectDelay       = 0.5
+        teleportLoopActive  = false
+        teleportTarget      = ""
+        teleportLoopDelay   = 3
+        teleportOffsetStuds = 3
         if teleportLoopThread then
             task.cancel(teleportLoopThread)
             teleportLoopThread = nil
@@ -650,15 +708,15 @@ Settings:CreateSection({ Name = "Status" })
 
 Settings:CreateParagraph({
     Title   = "System Status",
-    Content = "✔ Hub loaded\n✔ Auto Prospect ready\n✔ Teleport Loop ready\n✔ Shop system ready\n✔ UI stable",
+    Content = "✔ Hub v1.2 loaded\n✔ Super-speed Auto Prospect ready\n✔ In-front Offset Teleport ready\n✔ Teleport Loop ready\n✔ Shop system ready\n✔ UI stable",
 })
 
 -- =========================
 -- STARTUP NOTIFY
 -- =========================
 Mixusfield:Notify({
-    Title    = "Prospecting Hub",
-    Content  = "v1.1 loaded — Teleport Loop ready!",
+    Title    = "Prospecting Hub v1.2",
+    Content  = "Speed slider + in-front teleport ready!",
     Type     = "success",
     Duration = 5,
 })
