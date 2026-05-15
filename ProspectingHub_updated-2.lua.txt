@@ -1,0 +1,664 @@
+local Mixusfield = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua"
+))()
+
+local Players = game:GetService("Players")
+local player  = Players.LocalPlayer
+
+-- =========================
+-- SYSTEM STATE
+-- =========================
+local AutoProspect     = false
+local Delay            = 1
+
+local teleportLoopActive  = false
+local teleportLoopThread  = nil
+local teleportTarget      = ""
+local teleportDelay       = 3
+
+-- =========================
+-- TOOL DETECTION
+-- =========================
+local function getPan()
+    local char = player.Character or player.CharacterAdded:Wait()
+    for _, v in pairs(char:GetChildren()) do
+        if v:IsA("Tool") and string.find(v.Name:lower(), "pan") then
+            return v
+        end
+    end
+    return nil
+end
+
+-- =========================
+-- PROSPECT ACTION
+-- =========================
+local function prospectOnce()
+    local pan = getPan()
+    if not pan then return end
+
+    local scripts = pan:FindFirstChild("Scripts")
+    if not scripts then return end
+
+    local collect   = scripts:FindFirstChild("Collect")
+    local shake     = scripts:FindFirstChild("Shake")
+    local panRemote = scripts:FindFirstChild("Pan")
+
+    if collect and collect:IsA("RemoteFunction") then
+        pcall(function() collect:InvokeServer(1, true) end)
+    end
+    if panRemote and panRemote:IsA("RemoteFunction") then
+        pcall(function() panRemote:InvokeServer() end)
+    end
+    if shake and shake:IsA("RemoteEvent") then
+        pcall(function() shake:FireServer() end)
+    end
+end
+
+-- Auto prospect background loop
+task.spawn(function()
+    while true do
+        if AutoProspect then
+            prospectOnce()
+            task.wait(Delay)
+        else
+            task.wait(0.25)
+        end
+    end
+end)
+
+-- =========================
+-- TELEPORT HELPERS
+-- =========================
+local function findPlayer(name)
+    local lname = name:lower()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower():find(lname, 1, true) then
+            return p
+        end
+    end
+    return nil
+end
+
+local function doTeleport()
+    if teleportTarget == "" then
+        Mixusfield:Notify({
+            Title   = "Teleport",
+            Content = "No target set. Enter a username first.",
+            Type    = "warning",
+        })
+        return false
+    end
+
+    local target = findPlayer(teleportTarget)
+    if not target then
+        Mixusfield:Notify({
+            Title   = "Teleport Failed",
+            Content = "Player '" .. teleportTarget .. "' not found in server.",
+            Type    = "error",
+        })
+        return false
+    end
+
+    if target == player then
+        Mixusfield:Notify({
+            Title   = "Teleport",
+            Content = "You cannot teleport to yourself.",
+            Type    = "warning",
+        })
+        return false
+    end
+
+    local targetChar = target.Character
+    local localChar  = player.Character
+
+    if not targetChar or not targetChar:FindFirstChild("HumanoidRootPart") then
+        Mixusfield:Notify({
+            Title   = "Teleport Failed",
+            Content = target.Name .. "'s character is not available.",
+            Type    = "error",
+        })
+        return false
+    end
+
+    if not localChar or not localChar:FindFirstChild("HumanoidRootPart") then
+        Mixusfield:Notify({
+            Title   = "Teleport Failed",
+            Content = "Your character is not loaded.",
+            Type    = "error",
+        })
+        return false
+    end
+
+    localChar.HumanoidRootPart.CFrame =
+        targetChar.HumanoidRootPart.CFrame * CFrame.new(2, 0, 0)
+    return true
+end
+
+-- =========================
+-- SHOP DATA
+-- =========================
+local ShopItems = {
+
+    Pans = {
+        ["Plastic Pan"]     = { Price = 500,          Type = "Pan" },
+        ["Metal Pan"]       = { Price = 12000,         Type = "Pan" },
+        ["Silver Pan"]      = { Price = 55000,         Type = "Pan" },
+        ["Golden Pan"]      = { Price = 333000,        Type = "Pan" },
+        ["Magnetic Pan"]    = { Price = 1000000,       Type = "Pan" },
+        ["Frostbite Pan"]   = { Price = 2500000,       Type = "Pan" },
+        ["Abyssal Pan"]     = { Price = 15000000,      Type = "Pan" },
+        ["Nebula Pan"]      = { Price = 45000000,      Type = "Pan" },
+        ["Gingerbread Pan"] = { Price = 8000000,       Type = "Pan" },
+        ["Blightflow Pan"]  = { Price = 12000000,      Type = "Pan" },
+        ["Dragonflame Pan"] = { Price = 75000000,      Type = "Pan" },
+        ["Fossilized Pan"]  = { Price = 90000000,      Type = "Pan" },
+        ["Aurora Pan"]      = { Price = 150000000,     Type = "Pan" },
+        ["Lifetouched Pan"] = { Price = 80000000000,   Type = "Pan" },
+    },
+
+    Shovels = {
+        ["Iron Shovel"]        = { Price = 3000,          Type = "Shovel" },
+        ["Steel Shovel"]       = { Price = 25000,         Type = "Shovel" },
+        ["Silver Shovel"]      = { Price = 75000,         Type = "Shovel" },
+        ["Reinforced Shovel"]  = { Price = 135000,        Type = "Shovel" },
+        ["Golden Shovel"]      = { Price = 1333000,       Type = "Shovel" },
+        ["Meteoric Shovel"]    = { Price = 4000000,       Type = "Shovel" },
+        ["Diamond Shovel"]     = { Price = 12500000,      Type = "Shovel" },
+        ["Abyssal Shovel"]     = { Price = 18000000,      Type = "Shovel" },
+        ["Venomspade"]         = { Price = 22000000,      Type = "Shovel" },
+        ["Dragonflame Shovel"] = { Price = 400000000,     Type = "Shovel" },
+        ["Fossilized Shovel"]  = { Price = 1000000000,    Type = "Shovel" },
+        ["Icebreaker"]         = { Price = 10000000000,   Type = "Shovel" },
+        ["Candy Cane Shovel"]  = { Price = 5000000,       Type = "Shovel" },
+        ["Divine Shovel"]      = { Price = 40000000,      Type = "Shovel" },
+        ["Earthbreaker"]       = { Price = 125000000,     Type = "Shovel" },
+        ["Worldshaker"]        = { Price = 300000000,     Type = "Shovel" },
+        ["Lifetouched Shovel"] = { Price = 80000000000,   Type = "Shovel" },
+    },
+
+    Potions = {
+        ["Basic Luck Potion"]        = { Price = 5000,   Effect = "Luck Boost" },
+        ["Basic Capacity Potion"]    = { Price = 8000,   Effect = "Capacity Boost" },
+        ["Greater Luck Potion"]      = { Price = 50000,  Effect = "High Luck Boost" },
+        ["Greater Capacity Potion"]  = { Price = 60000,  Effect = "High Capacity Boost" },
+        ["Merchant's Potion"]        = { Price = 120000, Effect = "Better Shop Rates" },
+        ["Frozen Luck Potion"]       = { Price = 90000,  Effect = "Ice Luck Boost" },
+        ["Frozen Speed Potion"]      = { Price = 85000,  Effect = "Speed Boost" },
+        ["Cosmic Potion"]            = { Price = 200000, Effect = "Cosmic Luck" },
+        ["Supreme Luck Potion"]      = { Price = 500000, Effect = "Ultra Luck" },
+        ["Volcanic Luck Potion"]     = { Price = 450000, Effect = "Fire Luck" },
+        ["Volcanic Strength Potion"] = { Price = 470000, Effect = "Strength Boost" },
+    },
+
+    Items = {
+        ["Wood Sluice Box"]     = { Price = 0,            Type = "Sluice" },
+        ["Steel Sluice Box"]    = { Price = 15000,        Type = "Sluice" },
+        ["Gold Sluice Box"]     = { Price = 50000,        Type = "Sluice" },
+        ["Arctic Sluice"]       = { Price = 80000,        Type = "Sluice" },
+        ["Corroded Sluice"]     = { Price = 120000,       Type = "Sluice" },
+        ["Enchanted Sluice"]    = { Price = 200000000,    Type = "Sluice" },
+        ["Obsidian Sluice Box"] = { Price = 250000000,    Type = "Sluice" },
+        ["Lifetouched Sluice"]  = { Price = 80000000000,  Type = "Sluice" },
+        ["Starblossom Sluice"]  = { Price = 50000000,     Type = "Sluice" },
+        ["Luck Totem"]          = { Price = 150000,       Type = "Item" },
+        ["Strength Totem"]      = { Price = 200000,       Type = "Item" },
+        ["Luminant Totem"]      = { Price = 250000,       Type = "Item" },
+        ["The Excavator"]       = { Price = 320000,       Type = "Item" },
+        ["Starcrusher"]         = { Price = 60000000,     Type = "Item" },
+        ["Stardust Shake"]      = { Price = 30000000,     Type = "Item" },
+        ["Ambrosia"]            = { Price = 100000,       Type = "Item" },
+        ["Witches Brew"]        = { Price = 90000,        Type = "Item" },
+        ["Spirit Orb"]          = { Price = 75000,        Type = "Item" },
+        ["Snow Globe"]          = { Price = 50000,        Type = "Item" },
+        ["XP Cookie"]           = { Price = 30000,        Type = "Item" },
+        ["Gingerbread Cookie"]  = { Price = 25000,        Type = "Item" },
+        ["Festive Catalyst"]    = { Price = 120000,       Type = "Item" },
+    },
+}
+
+-- =========================
+-- FORMAT PRICE
+-- =========================
+local function formatPrice(n)
+    if n == 0 then return "Free" end
+    if n >= 1000000000000 then return string.format("$%.1fT", n / 1000000000000)
+    elseif n >= 1000000000 then return string.format("$%.1fB", n / 1000000000)
+    elseif n >= 1000000    then return string.format("$%.1fM", n / 1000000)
+    elseif n >= 1000       then return string.format("$%.1fK", n / 1000)
+    else return "$" .. n end
+end
+
+-- =========================
+-- BUY FUNCTION
+-- =========================
+local function buyItem(itemName, itemData)
+    local remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+        or game:GetService("ReplicatedStorage"):FindFirstChild("Remote")
+        or game:GetService("ReplicatedStorage")
+
+    local buyRemote = remotes and (
+        remotes:FindFirstChild("BuyItem")  or
+        remotes:FindFirstChild("Purchase") or
+        remotes:FindFirstChild("Buy")      or
+        remotes:FindFirstChild("ShopBuy")
+    )
+
+    if buyRemote and buyRemote:IsA("RemoteFunction") then
+        local ok, result = pcall(function()
+            return buyRemote:InvokeServer(itemName)
+        end)
+        if ok then
+            Mixusfield:Notify({ Title = "Purchased!", Content = "Bought: " .. itemName, Type = "success" })
+        else
+            Mixusfield:Notify({ Title = "Purchase Failed", Content = tostring(result), Type = "error" })
+        end
+    elseif buyRemote and buyRemote:IsA("RemoteEvent") then
+        pcall(function() buyRemote:FireServer(itemName) end)
+        Mixusfield:Notify({ Title = "Purchased!", Content = "Bought: " .. itemName, Type = "success" })
+    else
+        Mixusfield:Notify({
+            Title   = itemName,
+            Content = "Price: " .. formatPrice(itemData.Price) ..
+                (itemData.Effect and (" | " .. itemData.Effect) or ""),
+            Type = "info",
+        })
+    end
+end
+
+-- =========================
+-- WINDOW
+-- =========================
+local Window = Mixusfield:CreateWindow({
+    Name     = "Prospecting Hub",
+    Subtitle = "v1.1 — Full Build",
+    Theme    = "Dark",
+    ToggleButton = {
+        Enabled = true,
+        Icon    = { Type = "Lucide", Source = "menu" },
+    },
+})
+
+-- ═══════════════════════════════════════════════
+-- TAB 1 — MAIN
+-- ═══════════════════════════════════════════════
+local Main = Window:CreateTab({
+    Name = "Main",
+    Icon = { Type = "Lucide", Source = "home" },
+})
+
+Main:CreateSection({ Name = "Auto Prospect" })
+
+Main:CreateToggle({
+    Name     = "Enable Auto Prospect",
+    Default  = false,
+    Icon     = { Type = "Lucide", Source = "zap" },
+    Callback = function(v)
+        AutoProspect = v
+        Mixusfield:Notify({
+            Title   = "Auto Prospect",
+            Content = v and "Auto prospect started." or "Auto prospect stopped.",
+            Type    = v and "success" or "warning",
+        })
+    end,
+})
+
+Main:CreateSlider({
+    Name      = "Prospect Speed",
+    Min       = 0.2,
+    Max       = 3,
+    Default   = 1,
+    Increment = 0.1,
+    Suffix    = " sec",
+    Callback  = function(v)
+        Delay = v
+    end,
+})
+
+Main:CreateSection({ Name = "Manual" })
+
+Main:CreateButton({
+    Name     = "Prospect Once",
+    Icon     = { Type = "Lucide", Source = "play" },
+    Callback = function()
+        prospectOnce()
+        Mixusfield:Notify({
+            Title   = "Done",
+            Content = "Manual prospect completed.",
+            Type    = "success",
+        })
+    end,
+})
+
+Main:CreateSection({ Name = "Status" })
+
+Main:CreateLabel({ Name = "Hub loaded and running.",  Color = Color3.fromRGB(78, 205, 196) })
+Main:CreateLabel({ Name = "Version: 1.1.0",           Color = Color3.fromRGB(124, 107, 240) })
+
+-- ═══════════════════════════════════════════════
+-- TAB 2 — TELEPORT
+-- ═══════════════════════════════════════════════
+local TeleportTab = Window:CreateTab({
+    Name = "Teleport",
+    Icon = { Type = "Lucide", Source = "map-pin" },
+})
+
+-- ── Target ───────────────────────────────────────
+TeleportTab:CreateSection({ Name = "Target" })
+
+TeleportTab:CreateTextbox({
+    Name        = "Target Username",
+    Placeholder = "Enter player name...",
+    Default     = "",
+    Callback    = function(v)
+        teleportTarget = v
+    end,
+})
+
+TeleportTab:CreateSlider({
+    Name      = "Loop Delay",
+    Min       = 1,
+    Max       = 30,
+    Default   = 3,
+    Increment = 1,
+    Suffix    = " sec",
+    Callback  = function(v)
+        teleportDelay = v
+    end,
+})
+
+-- ── One-Shot ─────────────────────────────────────
+TeleportTab:CreateSection({ Name = "Teleport Once" })
+
+TeleportTab:CreateButton({
+    Name     = "Teleport Now",
+    Icon     = { Type = "Lucide", Source = "navigation" },
+    Callback = function()
+        if doTeleport() then
+            Mixusfield:Notify({
+                Title   = "Teleported!",
+                Content = "Teleported to " .. teleportTarget,
+                Type    = "success",
+            })
+        end
+    end,
+})
+
+-- ── Loop Toggle ───────────────────────────────────
+TeleportTab:CreateSection({ Name = "Loop Teleport" })
+
+TeleportTab:CreateToggle({
+    Name     = "Enable Teleport Loop",
+    Default  = false,
+    Icon     = { Type = "Lucide", Source = "repeat" },
+    Callback = function(enabled)
+        teleportLoopActive = enabled
+
+        if enabled then
+            -- guard: need a target first
+            if teleportTarget == "" then
+                teleportLoopActive = false
+                Mixusfield:Notify({
+                    Title   = "Loop Teleport",
+                    Content = "Set a target username first!",
+                    Type    = "warning",
+                })
+                return
+            end
+
+            Mixusfield:Notify({
+                Title   = "Loop Teleport ON",
+                Content = "Looping to " .. teleportTarget .. " every " .. teleportDelay .. "s.",
+                Type    = "success",
+            })
+
+            -- spawn the loop thread
+            teleportLoopThread = task.spawn(function()
+                while teleportLoopActive do
+                    doTeleport()
+                    task.wait(teleportDelay)
+                end
+            end)
+
+        else
+            -- kill thread immediately — no waiting for next tick
+            if teleportLoopThread then
+                task.cancel(teleportLoopThread)
+                teleportLoopThread = nil
+            end
+            teleportLoopActive = false
+            Mixusfield:Notify({
+                Title   = "Loop Teleport OFF",
+                Content = "Teleport loop stopped.",
+                Type    = "warning",
+            })
+        end
+    end,
+})
+
+-- ── Info ──────────────────────────────────────────
+TeleportTab:CreateSection({ Name = "How To Use" })
+
+TeleportTab:CreateParagraph({
+    Title   = "Teleport Loop Guide",
+    Content = "1. Type the target player's username in 'Target Username'.\n2. Set how often to teleport using 'Loop Delay' (1–30 sec).\n3. Toggle ON 'Enable Teleport Loop' — teleports automatically every X seconds.\n4. Toggle OFF at any time to stop instantly.",
+})
+
+TeleportTab:CreateLabel({ Name = "Toggle OFF stops the loop instantly.",        Color = Color3.fromRGB(78, 205, 196) })
+TeleportTab:CreateLabel({ Name = "Loop Delay range: 1 – 30 seconds.",           Color = Color3.fromRGB(255, 209, 102) })
+TeleportTab:CreateLabel({ Name = "Target must be in the same server as you.",   Color = Color3.fromRGB(255, 107, 107) })
+
+-- ═══════════════════════════════════════════════
+-- TAB 3 — SHOP
+-- ═══════════════════════════════════════════════
+local Shop = Window:CreateTab({
+    Name = "Shop",
+    Icon = { Type = "Lucide", Source = "shopping-cart" },
+})
+
+-- ── Pans ─────────────────────────────────────────
+Shop:CreateSection({ Name = "Pans" })
+
+local panList = {}
+for name in pairs(ShopItems.Pans) do table.insert(panList, name) end
+table.sort(panList, function(a, b)
+    return ShopItems.Pans[a].Price < ShopItems.Pans[b].Price
+end)
+local selectedPan = panList[1]
+
+Shop:CreateDropdown({
+    Name     = "Select Pan",
+    Options  = panList,
+    Default  = panList[1],
+    Callback = function(v) selectedPan = v end,
+})
+Shop:CreateButton({
+    Name     = "Buy Pan",
+    Icon     = { Type = "Lucide", Source = "shopping-cart" },
+    Callback = function()
+        if not selectedPan then
+            Mixusfield:Notify({ Title = "No Pan", Content = "Select a pan first.", Type = "warning" })
+            return
+        end
+        buyItem(selectedPan, ShopItems.Pans[selectedPan])
+    end,
+})
+local panText = ""
+for _, n in ipairs(panList) do
+    panText = panText .. n .. " — " .. formatPrice(ShopItems.Pans[n].Price) .. "\n"
+end
+Shop:CreateParagraph({ Title = "Pan Prices", Content = panText })
+
+-- ── Shovels ──────────────────────────────────────
+Shop:CreateSection({ Name = "Shovels" })
+
+local shovelList = {}
+for name in pairs(ShopItems.Shovels) do table.insert(shovelList, name) end
+table.sort(shovelList, function(a, b)
+    return ShopItems.Shovels[a].Price < ShopItems.Shovels[b].Price
+end)
+local selectedShovel = shovelList[1]
+
+Shop:CreateDropdown({
+    Name     = "Select Shovel",
+    Options  = shovelList,
+    Default  = shovelList[1],
+    Callback = function(v) selectedShovel = v end,
+})
+Shop:CreateButton({
+    Name     = "Buy Shovel",
+    Icon     = { Type = "Lucide", Source = "shopping-cart" },
+    Callback = function()
+        if not selectedShovel then
+            Mixusfield:Notify({ Title = "No Shovel", Content = "Select a shovel first.", Type = "warning" })
+            return
+        end
+        buyItem(selectedShovel, ShopItems.Shovels[selectedShovel])
+    end,
+})
+local shovelText = ""
+for _, n in ipairs(shovelList) do
+    shovelText = shovelText .. n .. " — " .. formatPrice(ShopItems.Shovels[n].Price) .. "\n"
+end
+Shop:CreateParagraph({ Title = "Shovel Prices", Content = shovelText })
+
+-- ── Potions ───────────────────────────────────────
+Shop:CreateSection({ Name = "Potions" })
+
+local potionList = {}
+for name in pairs(ShopItems.Potions) do table.insert(potionList, name) end
+table.sort(potionList, function(a, b)
+    return ShopItems.Potions[a].Price < ShopItems.Potions[b].Price
+end)
+local selectedPotion = potionList[1]
+
+Shop:CreateDropdown({
+    Name     = "Select Potion",
+    Options  = potionList,
+    Default  = potionList[1],
+    Callback = function(v) selectedPotion = v end,
+})
+Shop:CreateButton({
+    Name     = "Buy Potion",
+    Icon     = { Type = "Lucide", Source = "shopping-cart" },
+    Callback = function()
+        if not selectedPotion then
+            Mixusfield:Notify({ Title = "No Potion", Content = "Select a potion first.", Type = "warning" })
+            return
+        end
+        buyItem(selectedPotion, ShopItems.Potions[selectedPotion])
+    end,
+})
+local potionText = ""
+for _, n in ipairs(potionList) do
+    local d = ShopItems.Potions[n]
+    potionText = potionText .. n .. " — " .. formatPrice(d.Price) ..
+        (d.Effect and (" | " .. d.Effect) or "") .. "\n"
+end
+Shop:CreateParagraph({ Title = "Potion Prices & Effects", Content = potionText })
+
+-- ── Items / Sluices ───────────────────────────────
+Shop:CreateSection({ Name = "Items & Sluices" })
+
+local itemList = {}
+for name in pairs(ShopItems.Items) do table.insert(itemList, name) end
+table.sort(itemList, function(a, b)
+    return ShopItems.Items[a].Price < ShopItems.Items[b].Price
+end)
+local selectedShopItem = itemList[1]
+
+Shop:CreateDropdown({
+    Name     = "Select Item",
+    Options  = itemList,
+    Default  = itemList[1],
+    Callback = function(v) selectedShopItem = v end,
+})
+Shop:CreateButton({
+    Name     = "Buy Item",
+    Icon     = { Type = "Lucide", Source = "shopping-cart" },
+    Callback = function()
+        if not selectedShopItem then
+            Mixusfield:Notify({ Title = "No Item", Content = "Select an item first.", Type = "warning" })
+            return
+        end
+        buyItem(selectedShopItem, ShopItems.Items[selectedShopItem])
+    end,
+})
+local itemText = ""
+for _, n in ipairs(itemList) do
+    itemText = itemText .. n .. " — " .. formatPrice(ShopItems.Items[n].Price) .. "\n"
+end
+Shop:CreateParagraph({ Title = "Item Prices", Content = itemText })
+
+-- ═══════════════════════════════════════════════
+-- TAB 4 — SETTINGS
+-- ═══════════════════════════════════════════════
+local Settings = Window:CreateTab({
+    Name = "Settings",
+    Icon = { Type = "Lucide", Source = "settings" },
+})
+
+Settings:CreateSection({ Name = "Appearance" })
+
+Settings:CreateDropdown({
+    Name     = "Theme",
+    Options  = { "Dark", "Light", "AMOLED" },
+    Default  = "Dark",
+    Callback = function(v)
+        Mixusfield:SetTheme(v)
+        Mixusfield:Notify({ Title = "Theme", Content = "Switched to " .. v, Type = "info" })
+    end,
+})
+
+Settings:CreateSection({ Name = "Reset" })
+
+Settings:CreateButton({
+    Name     = "Reset All Systems",
+    Icon     = { Type = "Lucide", Source = "refresh-cw" },
+    Callback = function()
+        AutoProspect      = false
+        Delay             = 1
+        teleportLoopActive = false
+        teleportTarget    = ""
+        teleportDelay     = 3
+        if teleportLoopThread then
+            task.cancel(teleportLoopThread)
+            teleportLoopThread = nil
+        end
+        selectedPan      = panList[1]
+        selectedShovel   = shovelList[1]
+        selectedPotion   = potionList[1]
+        selectedShopItem = itemList[1]
+        Mixusfield:Notify({ Title = "Reset", Content = "All systems reset to default.", Type = "info" })
+    end,
+})
+
+Settings:CreateSection({ Name = "Window" })
+
+Settings:CreateButton({
+    Name     = "Minimize",
+    Icon     = { Type = "Lucide", Source = "minimize" },
+    Callback = function() Window:Minimize() end,
+})
+
+Settings:CreateButton({
+    Name     = "Hide Window",
+    Icon     = { Type = "Lucide", Source = "eye-off" },
+    Callback = function() Window:Hide() end,
+})
+
+Settings:CreateSection({ Name = "Status" })
+
+Settings:CreateParagraph({
+    Title   = "System Status",
+    Content = "✔ Hub loaded\n✔ Auto Prospect ready\n✔ Teleport Loop ready\n✔ Shop system ready\n✔ UI stable",
+})
+
+-- =========================
+-- STARTUP NOTIFY
+-- =========================
+Mixusfield:Notify({
+    Title    = "Prospecting Hub",
+    Content  = "v1.1 loaded — Teleport Loop ready!",
+    Type     = "success",
+    Duration = 5,
+})
