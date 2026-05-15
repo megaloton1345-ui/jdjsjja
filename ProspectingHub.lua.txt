@@ -1,5 +1,5 @@
 local Mixusfield = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua.txt"
+    "https://raw.githubusercontent.com/LumeCraftors01/Mixusfield/refs/heads/main/Mixusfield.lua
 ))()
 
 local Players = game:GetService("Players")
